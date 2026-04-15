@@ -1,33 +1,47 @@
 {
-  "schema_version": "kaidoku.phase1.bench.v1",
+  "schema_version": "kaidoku.phase1.bench.v2",
   "fixtures": [
     {
-      "fixture": "doclaynet_mixed_content.pdf",
-      "bytes": 104180,
+      "fixture": "doclaynet_simple_text.pdf",
+      "bytes": 334875,
+      "warmup_iterations": 2,
       "iterations": 7,
-      "median_full_ms": 22.078,
-      "median_first_page_ms": 15.496,
-      "median_throughput_mib_per_s": 4.5
+      "median_full_ms": 21.902,
+      "mad_full_ms": 0.098,
+      "median_first_page_ms": 21.982,
+      "mad_first_page_ms": 0.141,
+      "median_throughput_mib_per_s": 14.581,
+      "mad_throughput_mib_per_s": 0.065
     },
     {
       "fixture": "doclaynet_multi_column.pdf",
       "bytes": 25846,
+      "warmup_iterations": 2,
       "iterations": 7,
-      "median_full_ms": 18.53,
-      "median_first_page_ms": 17.924,
-      "median_throughput_mib_per_s": 1.33
+      "median_full_ms": 12.95,
+      "mad_full_ms": 0.202,
+      "median_first_page_ms": 13.05,
+      "mad_first_page_ms": 0.035,
+      "median_throughput_mib_per_s": 1.903,
+      "mad_throughput_mib_per_s": 0.03
     },
     {
-      "fixture": "doclaynet_simple_text.pdf",
-      "bytes": 334875,
+      "fixture": "doclaynet_mixed_content.pdf",
+      "bytes": 104180,
+      "warmup_iterations": 2,
       "iterations": 7,
-      "median_full_ms": 42.79,
-      "median_first_page_ms": 46.966,
-      "median_throughput_mib_per_s": 7.463
+      "median_full_ms": 10.954,
+      "mad_full_ms": 0.101,
+      "median_first_page_ms": 11.19,
+      "mad_first_page_ms": 0.241,
+      "median_throughput_mib_per_s": 9.07,
+      "mad_throughput_mib_per_s": 0.084
     }
   ],
   "checks": {
-    "throughput_max_regression_ratio": 0.4,
-    "latency_max_regression_ratio": 0.4
+    "warmup_iterations": 2,
+    "throughput_max_regression_ratio": 0.2,
+    "latency_max_regression_ratio": 0.2,
+    "noise_sigma_multiplier": 2.5
   }
 }

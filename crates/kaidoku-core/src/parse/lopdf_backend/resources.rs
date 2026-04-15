@@ -1,4 +1,4 @@
-use crate::ExtractError;
+use crate::{ExtractError, PageNumber};
 use lopdf::{Dictionary, Document, Object, ObjectId};
 use std::collections::HashMap;
 
@@ -120,22 +120,41 @@ fn extract_color_space(value: &Object) -> Option<String> {
     }
 }
 
-pub(super) fn page_dimensions(document: &Document, page_id: ObjectId) -> (f64, f64) {
-    if let Some([x0, y0, x1, y1]) = inherited_media_box(document, page_id) {
-        let width = (x1 - x0).abs();
-        let height = (y1 - y0).abs();
-        if width > 0.0 && height > 0.0 {
-            return (width, height);
-        }
+pub(super) fn page_dimensions(
+    document: &Document,
+    page_number: PageNumber,
+    page_id: ObjectId,
+) -> Result<(f64, f64), ExtractError> {
+    let media_box =
+        inherited_media_box(document, page_id).ok_or(ExtractError::MalformedPageGeometry {
+            page_number: page_number.get(),
+            page_object_number: page_id.0,
+            page_object_generation: page_id.1,
+            reason: "missing inherited MediaBox".to_string(),
+        })?;
+
+    let width = (media_box[2] - media_box[0]).abs();
+    let height = (media_box[3] - media_box[1]).abs();
+    if width > 0.0 && height > 0.0 {
+        return Ok((width, height));
     }
-    (612.0, 792.0)
+
+    Err(ExtractError::MalformedPageGeometry {
+        page_number: page_number.get(),
+        page_object_number: page_id.0,
+        page_object_generation: page_id.1,
+        reason: format!(
+            "invalid MediaBox dimensions [{:.3}, {:.3}, {:.3}, {:.3}]",
+            media_box[0], media_box[1], media_box[2], media_box[3]
+        ),
+    })
 }
 
 fn inherited_media_box(document: &Document, page_id: ObjectId) -> Option<[f64; 4]> {
     let mut cursor = Some(page_id);
     while let Some(current_id) = cursor {
         let dict = document.get_dictionary(current_id).ok()?;
-        if let Ok(media_box) = dict.get(b"MediaBox") {
+        if let Ok(media_box) = dict.get_deref(b"MediaBox", document) {
             let array = media_box.as_array().ok()?;
             if array.len() != 4 {
                 return None;
@@ -160,4 +179,70 @@ fn object_to_f32(value: &Object) -> Result<f32, ExtractError> {
         .map_err(|error| ExtractError::ContentDecode {
             reason: error.to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_dimensions;
+    use crate::{ExtractError, PageNumber};
+    use lopdf::{Document, Object, ObjectId, dictionary};
+
+    #[test]
+    fn page_dimensions_reads_inherited_media_box() {
+        let mut document = Document::new();
+        let page_tree_id: ObjectId = (1, 0);
+        let page_id: ObjectId = (2, 0);
+
+        document.objects.insert(
+            page_tree_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => 1,
+                "MediaBox" => vec![0.into(), 0.into(), 500.into(), 700.into()],
+            }),
+        );
+        document.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Page",
+                "Parent" => Object::Reference(page_tree_id),
+            }),
+        );
+
+        let page_number = PageNumber::new(1);
+        assert!(page_number.is_ok());
+        let Ok(page_number) = page_number else { return };
+        let dimensions = page_dimensions(&document, page_number, page_id);
+        assert!(dimensions.is_ok());
+
+        let Ok((width, height)) = dimensions else {
+            return;
+        };
+        assert!((width - 500.0).abs() < f64::EPSILON);
+        assert!((height - 700.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn page_dimensions_errors_on_malformed_media_box() {
+        let mut document = Document::new();
+        let page_id: ObjectId = (1, 0);
+
+        document.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Page",
+                "MediaBox" => vec![0.into(), 0.into(), 500.into()],
+            }),
+        );
+
+        let page_number = PageNumber::new(1);
+        assert!(page_number.is_ok());
+        let Ok(page_number) = page_number else { return };
+        let dimensions = page_dimensions(&document, page_number, page_id);
+        assert!(dimensions.is_err());
+
+        let Err(error) = dimensions else { return };
+        assert!(matches!(error, ExtractError::MalformedPageGeometry { .. }));
+    }
 }

@@ -18,6 +18,12 @@ Run all checks locally with:
 just ci
 ```
 
+Parser-adapter policy:
+
+- Any change under `crates/kaidoku-core/src/parse/` must run and pass `just phase1-gate`.
+- Parser-adapter PRs are expected to include updated goldens/bench baseline when behavior changes.
+- The Phase 1 fixture corpus is pinned; removing or renaming required fixtures is gate-breaking.
+
 ## Phase 1 Demo
 
 Run the canonical extraction demo over the committed Phase 1 fixture corpus:

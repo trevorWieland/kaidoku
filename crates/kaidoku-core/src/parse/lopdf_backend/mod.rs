@@ -6,6 +6,7 @@ use crate::{
     BACKEND_ID, ExtractError, ExtractOptions, ExtractionDocument, ExtractionPage, ExtractionSource,
     PageNumber, SCHEMA_VERSION,
 };
+use emit::ExtractionLimits;
 use lopdf::{Document, ObjectId};
 use sha2::{Digest, Sha256};
 
@@ -35,19 +36,14 @@ impl ParseBackend for LopdfBackend {
             });
         }
 
-        let selection = options.page_selection.validate(total_pages)?;
+        let selection = options.page_selection.clone().validate(total_pages)?;
 
         let mut extracted_pages = Vec::new();
         for (page_number, page_id) in pages {
             if !selection.includes(page_number) {
                 continue;
             }
-            extracted_pages.push(extract_page(
-                &document,
-                page_number,
-                page_id,
-                options.coordinate_precision,
-            )?);
+            extracted_pages.push(extract_page(&document, page_number, page_id, &options)?);
         }
 
         if extracted_pages.is_empty() {
@@ -72,18 +68,23 @@ fn extract_page(
     document: &Document,
     page_number: u32,
     page_id: ObjectId,
-    coordinate_precision: u8,
+    options: &ExtractOptions,
 ) -> Result<ExtractionPage, ExtractError> {
     let page_number = PageNumber::new(page_number)?;
-    let (page_width, page_height) = resources::page_dimensions(document, page_id);
+    let (page_width, page_height) = resources::page_dimensions(document, page_number, page_id)?;
     let image_catalog = resources::build_image_catalog(document, page_id)?;
 
     let mut elements = emit::extract_page_elements(
         document,
         page_number,
         page_id,
-        coordinate_precision,
+        options.coordinate_precision,
         &image_catalog,
+        ExtractionLimits {
+            operation_budget: options.max_operations_per_page,
+            max_elements: options.max_elements_per_page,
+            stream_byte_limit: options.max_content_stream_bytes,
+        },
     )?;
 
     elements.sort_by_key(emit::element_sort_key);

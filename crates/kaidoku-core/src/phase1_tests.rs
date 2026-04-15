@@ -1,9 +1,16 @@
-use crate::{ExtractOptions, extract_pdf, to_canonical_json};
+use crate::{ExtractError, ExtractOptions, RawPayload, extract_pdf, to_canonical_json};
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const REQUIRED_PHASE1_FIXTURES: [&str; 3] = [
+    "doclaynet_simple_text.pdf",
+    "doclaynet_multi_column.pdf",
+    "doclaynet_mixed_content.pdf",
+];
 
 #[derive(Debug, serde::Deserialize)]
 struct ProvenanceManifest {
@@ -16,10 +23,19 @@ struct ProvenanceFixture {
     sha256: String,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct BenchBaseline {
+    fixtures: Vec<BenchFixture>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BenchFixture {
+    fixture: String,
+}
+
 #[test]
 fn golden_outputs_match_phase1_fixtures() {
     let fixture_paths = phase1_fixture_paths();
-    assert!(!fixture_paths.is_empty(), "phase1 fixtures are missing");
 
     for fixture_path in fixture_paths {
         let bytes = fs::read(&fixture_path);
@@ -69,7 +85,6 @@ fn golden_outputs_match_phase1_fixtures() {
 #[test]
 fn extraction_is_deterministic_for_same_input() {
     let fixture_paths = phase1_fixture_paths();
-    assert!(!fixture_paths.is_empty(), "phase1 fixtures are missing");
 
     for fixture_path in fixture_paths {
         let bytes = fs::read(&fixture_path);
@@ -117,30 +132,56 @@ fn extraction_is_deterministic_for_same_input() {
 }
 
 #[test]
+fn fixture_sets_are_pinned_and_in_parity() {
+    let fixture_names = phase1_fixture_names();
+    let expected = required_fixture_set();
+
+    assert_eq!(
+        fixture_names, expected,
+        "phase1 fixture corpus must exactly match required fixture names"
+    );
+
+    let manifest = load_manifest();
+    let manifest_names = manifest
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.name.clone())
+        .collect::<BTreeSet<String>>();
+    assert_eq!(
+        manifest_names, expected,
+        "manifest fixture names must exactly match required fixture set"
+    );
+
+    let golden_names = golden_fixture_names();
+    let expected_golden = expected
+        .iter()
+        .map(|name| name.trim_end_matches(".pdf").to_string())
+        .collect::<BTreeSet<String>>();
+    assert_eq!(
+        golden_names, expected_golden,
+        "golden fixture names must exactly match corpus fixture set"
+    );
+
+    let bench = load_benchmark_baseline();
+    let bench_names = bench
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.fixture.clone())
+        .collect::<BTreeSet<String>>();
+    assert_eq!(
+        bench_names, expected,
+        "benchmark baseline fixture set must exactly match required fixture set"
+    );
+}
+
+#[test]
 fn fixture_provenance_hashes_match_files() {
-    let manifest_path = corpus_dir().join("provenance.json");
-    let manifest_content = fs::read_to_string(&manifest_path);
-    assert!(
-        manifest_content.is_ok(),
-        "failed reading provenance manifest {}",
-        manifest_path.display(),
-    );
+    let manifest = load_manifest();
 
-    let Ok(manifest_content) = manifest_content else {
-        return;
-    };
-
-    let manifest: Result<ProvenanceManifest, _> = serde_json::from_str(&manifest_content);
-    assert!(
-        manifest.is_ok(),
-        "failed parsing provenance manifest {}",
-        manifest_path.display(),
-    );
-
-    let Ok(manifest) = manifest else { return };
-    assert!(
-        !manifest.fixtures.is_empty(),
-        "provenance fixtures are empty"
+    assert_eq!(
+        manifest.fixtures.len(),
+        REQUIRED_PHASE1_FIXTURES.len(),
+        "provenance fixture count must match required fixture count"
     );
 
     for fixture in manifest.fixtures {
@@ -165,6 +206,112 @@ fn fixture_provenance_hashes_match_files() {
     }
 }
 
+#[test]
+fn source_refs_are_unique_per_operation() {
+    for fixture_path in phase1_fixture_paths() {
+        let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+        let document = extract_pdf(&bytes, ExtractOptions::default())
+            .expect("fixture extraction should succeed");
+
+        for page in document.pages {
+            let mut keys = BTreeSet::new();
+            for element in page.elements {
+                let source_ref = element.source_ref();
+                let key = (
+                    source_ref.stream_index(),
+                    source_ref.operation_index(),
+                    source_ref.element_index(),
+                );
+                assert!(
+                    keys.insert(key),
+                    "duplicate source_ref within page {} in fixture {}",
+                    page.page_number.get(),
+                    fixture_path.display(),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn decoded_text_avoids_control_character_gibberish() {
+    for fixture_path in phase1_fixture_paths() {
+        let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+        let document = extract_pdf(&bytes, ExtractOptions::default())
+            .expect("fixture extraction should succeed");
+
+        for page in document.pages {
+            for element in page.elements {
+                let text = match element.payload() {
+                    RawPayload::Span(span) => span.text.as_str(),
+                    RawPayload::Char(character) => character.text.as_str(),
+                    RawPayload::Image(_) => continue,
+                };
+
+                let has_bad_controls = text.chars().any(|character| {
+                    character.is_control() && !matches!(character, '\n' | '\r' | '\t')
+                });
+                assert!(
+                    !has_bad_controls,
+                    "decoded text contains control characters on page {} in {}: {:?}",
+                    page.page_number.get(),
+                    fixture_path.display(),
+                    text,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn input_size_limit_rejects_oversized_payloads() {
+    let options = ExtractOptions {
+        max_input_bytes: 1,
+        ..ExtractOptions::default()
+    };
+
+    let err = extract_pdf(&[1_u8, 2_u8], options).expect_err("oversized payload must fail early");
+    assert!(matches!(
+        err,
+        ExtractError::InputTooLarge {
+            limit_bytes: 1,
+            actual_bytes: 2,
+        }
+    ));
+}
+
+fn required_fixture_set() -> BTreeSet<String> {
+    REQUIRED_PHASE1_FIXTURES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+fn phase1_fixture_names() -> BTreeSet<String> {
+    phase1_fixture_paths()
+        .into_iter()
+        .filter_map(|path| path.file_name().and_then(OsStr::to_str).map(str::to_string))
+        .collect()
+}
+
+fn golden_fixture_names() -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    if let Ok(entries) = fs::read_dir(golden_dir()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension() == Some(OsStr::new("json"))
+                && path.file_name() != Some(OsStr::new("benchmarks.baseline.json"))
+                && path.file_name() != Some(OsStr::new("benchmarks.current.json"))
+                && let Some(stem) = path.file_stem().and_then(OsStr::to_str)
+            {
+                names.insert(stem.to_string());
+            }
+        }
+    }
+
+    names
+}
+
 fn phase1_fixture_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(entries) = fs::read_dir(corpus_dir()) {
@@ -177,6 +324,19 @@ fn phase1_fixture_paths() -> Vec<PathBuf> {
     }
     paths.sort();
     paths
+}
+
+fn load_manifest() -> ProvenanceManifest {
+    let manifest_path = corpus_dir().join("provenance.json");
+    let manifest_content =
+        fs::read_to_string(&manifest_path).expect("provenance manifest is readable");
+    serde_json::from_str(&manifest_content).expect("provenance manifest is valid json")
+}
+
+fn load_benchmark_baseline() -> BenchBaseline {
+    let baseline_path = golden_dir().join("benchmarks.baseline.json");
+    let content = fs::read_to_string(&baseline_path).expect("benchmark baseline is readable");
+    serde_json::from_str(&content).expect("benchmark baseline is valid json")
 }
 
 fn golden_path_for(fixture_path: &Path) -> PathBuf {

@@ -4,8 +4,9 @@ mod parse;
 pub use model::{
     BBox, CharPayload, ElementKind, ExtractOptions, ExtractionDocument, ExtractionPage,
     ExtractionSource, ImagePayload, PageNumber, PageRange, PageRangeError, PageSelection,
-    RawElement, RawPayload, SourceRef, SpanPayload, ValidationError, default_max_input_bytes,
-    default_max_pages,
+    RawElement, RawPayload, SourceRef, SpanPayload, ValidationError,
+    default_max_content_stream_bytes, default_max_elements_per_page, default_max_input_bytes,
+    default_max_operations_per_page, default_max_pages,
 };
 
 use parse::extract_with_backend;
@@ -42,6 +43,22 @@ pub enum ExtractError {
     PdfParse { reason: String },
     #[error("content decode failed: {reason}")]
     ContentDecode { reason: String },
+    #[error(
+        "malformed page geometry on page {page_number} (object {page_object_number}:{page_object_generation}): {reason}"
+    )]
+    MalformedPageGeometry {
+        page_number: u32,
+        page_object_number: u32,
+        page_object_generation: u16,
+        reason: String,
+    },
+    #[error("extraction limit exceeded on page {page_number}: {kind} {actual} > {limit}")]
+    ExtractionLimitExceeded {
+        page_number: u32,
+        kind: &'static str,
+        limit: u64,
+        actual: u64,
+    },
     #[error("invariant violated: {reason}")]
     InvariantViolation { reason: String },
     #[error("json serialization failed: {0}")]
