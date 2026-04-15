@@ -1,0 +1,18 @@
+[package]
+name = "kaidoku-python"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "PyO3 bridge crate shell for kaidoku"
+
+[lib]
+name = "kaidoku_python"
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+pyo3 = { workspace = true }
