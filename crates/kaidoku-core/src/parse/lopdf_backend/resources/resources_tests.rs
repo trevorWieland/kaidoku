@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{ExtractError, PageNumber};
 use lopdf::{Document, Object, ObjectId, Stream, dictionary};
+use std::collections::HashMap;
 
 #[test]
 fn page_geometry_reads_inherited_media_box() {
@@ -138,6 +139,25 @@ fn page_geometry_applies_crop_and_rotate_to_output_dimensions() {
 }
 
 #[test]
+fn page_geometry_rejects_non_right_angle_rotation() {
+    let mut document = Document::new();
+    let page_id: ObjectId = (1, 0);
+
+    document.objects.insert(
+        page_id,
+        Object::Dictionary(dictionary! {
+            "Type" => "Page",
+            "MediaBox" => vec![0.into(), 0.into(), 300.into(), 200.into()],
+            "Rotate" => 135,
+        }),
+    );
+
+    let page_number = PageNumber::new(1).expect("page number");
+    let error = page_geometry(&document, page_number, page_id, 8).expect_err("invalid rotation");
+    assert!(matches!(error, ExtractError::MalformedPageGeometry { .. }));
+}
+
+#[test]
 fn page_resource_scope_and_form_scope_resolve_xobjects() {
     let mut document = Document::new();
     let page_id: ObjectId = (1, 0);
@@ -207,8 +227,12 @@ fn page_resource_scope_and_form_scope_resolve_xobjects() {
         .expect("form object")
         .as_stream()
         .expect("form stream");
-    let nested_scope = form_resource_scope(&document, &scope, form_stream);
+    let mut cache = HashMap::new();
+    let nested_scope = form_resource_scope(&document, &scope, form_id, form_stream, &mut cache);
     assert!(nested_scope.resolve_xobject(b"NestedImage").is_some());
+
+    let cached_scope = form_resource_scope(&document, &scope, form_id, form_stream, &mut cache);
+    assert!(cached_scope.resolve_xobject(b"NestedImage").is_some());
 
     let metadata = image_metadata_for_object(&document, image_id, b"Im1").expect("metadata");
     assert_eq!(metadata.width_px, 10);

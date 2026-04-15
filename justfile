@@ -51,6 +51,7 @@ bootstrap:
 
     tools=(
         "cargo-deny:cargo-deny"
+        "cargo-fuzz:cargo-fuzz"
         "cargo-llvm-cov:cargo-llvm-cov"
         "cargo-machete:cargo-machete"
         "cargo-hack:cargo-hack"
@@ -70,6 +71,14 @@ bootstrap:
             fi
         fi
     done
+
+    echo "==> Ensuring nightly toolchain for fuzzing..."
+    if ! rustup toolchain list | grep -q '^nightly'; then
+        if ! rustup toolchain install nightly; then
+            echo "  FAIL: nightly toolchain"
+            failed="$failed nightly-toolchain"
+        fi
+    fi
 
     echo "==> Platform-specific setup..."
     if [[ "$(uname -s)" == "Linux" ]]; then
@@ -124,17 +133,22 @@ test *args:
     @{{ cargo }} nextest run --workspace --profile ci --no-tests=pass {{ args }}
 
 phase1-bench:
-    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --fixtures tests/corpus/phase1 --output tests/golden/phase1/benchmarks.current.json
+    @{{ cargo }} run --release -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --fixtures tests/corpus/phase1 --output tests/golden/phase1/benchmarks.current.json
 
 phase1-bench-refresh:
-    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --fixtures tests/corpus/phase1 --output tests/golden/phase1/benchmarks.baseline.json
+    @{{ cargo }} run --release -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --fixtures tests/corpus/phase1 --output tests/golden/phase1/benchmarks.baseline.json
 
 phase1-gate:
     @{{ cargo }} nextest run -p kaidoku-core --profile ci --no-tests=pass
-    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --check --fixtures tests/corpus/phase1 --baseline tests/golden/phase1/benchmarks.baseline.json --output target/phase1/benchmarks.current.json
+    @{{ cargo }} run --release -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --check --fixtures tests/corpus/phase1 --baseline tests/golden/phase1/benchmarks.baseline.json --output target/phase1/benchmarks.current.json
 
 phase1-demo:
     @{{ cargo }} run -p kaidoku-cli -- extract --input tests/corpus/phase1/doclaynet_simple_text.pdf --input tests/corpus/phase1/doclaynet_multi_column.pdf --input tests/corpus/phase1/doclaynet_mixed_content.pdf --output target/phase1/demo
+
+phase1-fuzz-smoke:
+    @cd fuzz && cargo +nightly fuzz run decode_filters -- -max_total_time=20
+    @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=20
+    @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=20
 
 coverage:
     @{{ cargo }} llvm-cov nextest -p kaidoku-core --profile ci --lcov --output-path lcov.info --fail-under-lines 80 --no-tests=pass

@@ -14,6 +14,7 @@ pub(super) fn run_extract(command: ExtractCommand) -> Result<()> {
     }
 
     let selection = parse_pages_spec(command.pages.as_deref())?;
+    let max_wall_time_ms = command.max_wall_time_ms;
     fs::create_dir_all(&command.output).with_context(|| {
         format!(
             "failed creating output directory {}",
@@ -35,7 +36,7 @@ pub(super) fn run_extract(command: ExtractCommand) -> Result<()> {
         planned_outputs
             .par_iter()
             .map(|(input_path, output_path)| {
-                extract_one(input_path, output_path, selection.clone())
+                extract_one(input_path, output_path, selection.clone(), max_wall_time_ms)
             })
             .collect::<Result<Vec<_>>>()
     })?;
@@ -43,14 +44,20 @@ pub(super) fn run_extract(command: ExtractCommand) -> Result<()> {
     Ok(())
 }
 
-fn extract_one(input_path: &Path, output_path: &Path, page_selection: PageSelection) -> Result<()> {
+fn extract_one(
+    input_path: &Path,
+    output_path: &Path,
+    page_selection: PageSelection,
+    max_wall_time_ms: u64,
+) -> Result<()> {
     let bytes = fs::read(input_path)
         .with_context(|| format!("failed reading input file {}", input_path.display()))?;
 
-    let options = ExtractOptions {
-        page_selection,
-        ..ExtractOptions::default()
-    };
+    let options = ExtractOptions::builder()
+        .page_selection(page_selection)
+        .max_wall_time_ms(max_wall_time_ms)
+        .build()
+        .context("invalid extraction options")?;
 
     let document = extract_pdf(&bytes, options)
         .with_context(|| format!("failed extracting {}", input_path.display()))?;

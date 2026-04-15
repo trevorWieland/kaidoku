@@ -1,0 +1,36 @@
+[package]
+name = "kaidoku-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+kaidoku-core = { path = "../crates/kaidoku-core", features = ["fuzzing"] }
+
+[[bin]]
+name = "decode_filters"
+path = "fuzz_targets/decode_filters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "content_ops"
+path = "fuzz_targets/content_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "geometry_normalization"
+path = "fuzz_targets/geometry_normalization.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = []

@@ -58,70 +58,32 @@ pub(super) fn emit_text_elements(
         return Ok(());
     }
 
-    let characters = decoded_text.chars().collect::<Vec<char>>();
-    if characters.is_empty() {
+    let char_count = decoded_text.chars().count();
+    if char_count == 0 {
         return Ok(());
     }
 
     let mut width_units =
         context
             .font_catalog
-            .glyph_widths(text_state.font_key(), raw_bytes, characters.len());
-    width_units = align_widths_with_char_count(width_units, characters.len());
+            .glyph_widths(text_state.font_key(), raw_bytes, char_count);
+    width_units = align_widths_with_char_count(width_units, char_count);
 
-    let font_name = context.font_catalog.display_name(text_state.font_key());
-    let mut pending_chars = Vec::with_capacity(characters.len());
+    let font_id = context.intern_font_id(text_state.font_key())?;
+
+    let mut probe_state = text_state.clone();
     let mut span_bbox: Option<BBox> = None;
-
-    for (idx, character) in characters.iter().enumerate() {
-        let idx_u32 = u32::try_from(idx).map_err(|_| ExtractError::InvariantViolation {
-            reason: "character index overflow".to_string(),
-        })?;
-
+    for (idx, character) in decoded_text.chars().enumerate() {
         let glyph_width_units = width_units.get(idx).copied().unwrap_or(500.0).max(0.0);
-        let glyph_advance = (glyph_width_units / 1000.0)
-            * text_state.font_size()
-            * text_state.horizontal_scale_factor();
-        let spacing_advance = (text_state.char_spacing()
-            + if *character == ' ' {
-                text_state.word_spacing()
-            } else {
-                0.0
-            })
-            * text_state.horizontal_scale_factor();
+        let (glyph_advance, total_advance) = advances(&probe_state, character, glyph_width_units);
 
-        let total_advance = (glyph_advance + spacing_advance).max(0.0);
-        let char_bbox = if let Some((x, y, width, height)) = text_state
-            .glyph_transform(graphics_state.ctm(), glyph_advance.max(1e-6))
-            .to_bbox()
-        {
-            BBox::new(x, y, width, height)?
-        } else {
-            let origin = text_state.current_origin(graphics_state.ctm());
-            BBox::new(
-                origin.0,
-                origin.1,
-                glyph_advance.max(1e-6),
-                text_state.font_size(),
-            )?
-        };
-
+        let char_bbox = char_bbox_for_state(&probe_state, graphics_state, glyph_advance)?;
         span_bbox = Some(match span_bbox {
             None => char_bbox,
             Some(previous) => merge_bbox(previous, char_bbox)?,
         });
 
-        pending_chars.push((
-            char_bbox,
-            CharPayload {
-                text: character.to_string(),
-                font_name: font_name.clone(),
-                font_size: text_state.font_size(),
-                char_index: idx_u32,
-            },
-        ));
-
-        text_state.advance_text(total_advance);
+        probe_state.advance_text(total_advance);
     }
 
     let span_bbox = if let Some(span_bbox) = span_bbox {
@@ -142,18 +104,77 @@ pub(super) fn emit_text_elements(
         span_element_index,
         span_bbox,
         SpanPayload {
-            text: decoded_text,
-            font_name: font_name.clone(),
+            text: decoded_text.clone(),
+            font_id,
             font_size: text_state.font_size(),
         },
     )?;
 
-    for (bbox, payload) in pending_chars {
+    for (idx, character) in decoded_text.chars().enumerate() {
+        let idx_u32 = u32::try_from(idx).map_err(|_| ExtractError::InvariantViolation {
+            reason: "character index overflow".to_string(),
+        })?;
+
+        let glyph_width_units = width_units.get(idx).copied().unwrap_or(500.0).max(0.0);
+        let (glyph_advance, total_advance) = advances(text_state, character, glyph_width_units);
+
+        let char_bbox = char_bbox_for_state(text_state, graphics_state, glyph_advance)?;
+
         let char_element_index = cursor.next_element_index()?;
-        context.push_char(operation_index, char_element_index, bbox, payload)?;
+        context.push_char(
+            operation_index,
+            char_element_index,
+            char_bbox,
+            CharPayload {
+                text: character.to_string(),
+                font_id,
+                font_size: text_state.font_size(),
+                char_index: idx_u32,
+            },
+        )?;
+
+        text_state.advance_text(total_advance);
     }
 
     Ok(())
+}
+
+fn advances(text_state: &TextState, character: char, glyph_width_units: f64) -> (f64, f64) {
+    let glyph_advance = (glyph_width_units / 1000.0)
+        * text_state.font_size()
+        * text_state.horizontal_scale_factor();
+    let spacing_advance = (text_state.char_spacing()
+        + if character == ' ' {
+            text_state.word_spacing()
+        } else {
+            0.0
+        })
+        * text_state.horizontal_scale_factor();
+
+    let total_advance = (glyph_advance + spacing_advance).max(0.0);
+    (glyph_advance, total_advance)
+}
+
+fn char_bbox_for_state(
+    text_state: &TextState,
+    graphics_state: &GraphicsState,
+    glyph_advance: f64,
+) -> Result<BBox, ExtractError> {
+    if let Some((x, y, width, height)) = text_state
+        .glyph_transform(graphics_state.ctm(), glyph_advance.max(1e-6))
+        .to_bbox()
+    {
+        BBox::new(x, y, width, height).map_err(ExtractError::from)
+    } else {
+        let origin = text_state.current_origin(graphics_state.ctm());
+        BBox::new(
+            origin.0,
+            origin.1,
+            glyph_advance.max(1e-6),
+            text_state.font_size(),
+        )
+        .map_err(ExtractError::from)
+    }
 }
 
 fn merge_bbox(left: BBox, right: BBox) -> Result<BBox, ExtractError> {

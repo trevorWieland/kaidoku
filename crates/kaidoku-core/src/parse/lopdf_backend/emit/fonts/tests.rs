@@ -129,10 +129,7 @@ fn catalog_decodes_and_returns_widths_for_known_and_unknown_fonts() {
 
     let fallback_widths = catalog.glyph_widths(Some(b"MISSING"), b"ZZ", 2);
     assert_eq!(fallback_widths, vec![500.0, 500.0]);
-    assert_eq!(
-        catalog.display_name(Some(b"F1")),
-        Some("UnitTestFont".to_string())
-    );
+    assert_eq!(catalog.display_name(Some(b"F1")), Some("UnitTestFont"));
     assert_eq!(catalog.display_name(Some(b"MISSING")), None);
 }
 
@@ -175,10 +172,7 @@ fn from_page_builds_catalog_from_page_resources() {
 
     let widths = catalog.glyph_widths(Some(b"F1"), b"A", 1);
     assert_eq!(widths, vec![500.0]);
-    assert_eq!(
-        catalog.display_name(Some(b"F1")),
-        Some("Helvetica".to_string())
-    );
+    assert_eq!(catalog.display_name(Some(b"F1")), Some("Helvetica"));
 }
 
 #[test]

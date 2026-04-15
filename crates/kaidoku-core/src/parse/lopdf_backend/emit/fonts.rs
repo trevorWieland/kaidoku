@@ -95,10 +95,10 @@ impl<'a> FontCatalog<'a> {
     }
 
     #[must_use]
-    pub(super) fn display_name(&self, font_key: Option<&[u8]>) -> Option<String> {
+    pub(super) fn display_name(&self, font_key: Option<&[u8]>) -> Option<&str> {
         font_key
             .and_then(|key| self.fonts.get(key))
-            .map(|font| font.display_name.clone())
+            .map(|font| font.display_name.as_str())
     }
 
     #[must_use]

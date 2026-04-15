@@ -1,15 +1,19 @@
+use super::ExtractionControl;
 use crate::{ExtractError, PageNumber};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use lopdf::{Object, Stream};
 use std::io::{self, Read, Write};
 use weezl::{BitOrder, decode::Decoder as LzwDecoder};
 
-pub(super) fn decode_content_stream_bounded(
+pub(crate) fn decode_content_stream_bounded(
     stream: &Stream,
     page_number: PageNumber,
     stream_index: u32,
     stream_byte_limit: usize,
+    control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
+    control.checkpoint("decode_content_stream_start", Some(page_number))?;
+
     let filters = if stream.dict.get(b"Filter").is_ok() {
         stream
             .filters()
@@ -36,6 +40,8 @@ pub(super) fn decode_content_stream_bounded(
     let mut current = stream.content.clone();
 
     for (index, filter) in filters.iter().enumerate() {
+        control.checkpoint("decode_content_stream_filter", Some(page_number))?;
+
         let params = decode_params.and_then(|value| decode_params_for_filter(value, index));
         current = decode_filter_bounded(
             filter,
@@ -44,6 +50,7 @@ pub(super) fn decode_content_stream_bounded(
             page_number,
             stream_index,
             stream_byte_limit,
+            control,
         )?;
     }
 
@@ -65,6 +72,7 @@ fn decode_filter_bounded(
     page_number: PageNumber,
     stream_index: u32,
     limit: usize,
+    control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
     if predictor_value(decode_params).unwrap_or(1) > 1 {
         return Err(ExtractError::ContentDecode {
@@ -73,12 +81,25 @@ fn decode_filter_bounded(
     }
 
     match filter {
-        b"FlateDecode" | b"Fl" => decode_zlib_bounded(input, page_number, stream_index, limit),
-        b"LZWDecode" | b"LZW" => {
-            decode_lzw_bounded(input, decode_params, page_number, stream_index, limit)
+        b"FlateDecode" | b"Fl" => {
+            decode_zlib_bounded(input, page_number, stream_index, limit, control)
         }
+        b"LZWDecode" | b"LZW" => decode_lzw_bounded(
+            input,
+            decode_params,
+            page_number,
+            stream_index,
+            limit,
+            control,
+        ),
         b"ASCII85Decode" | b"A85" => {
-            decode_ascii85_bounded(input, page_number, stream_index, limit)
+            decode_ascii85_bounded(input, page_number, stream_index, limit, control)
+        }
+        b"ASCIIHexDecode" | b"AHx" => {
+            decode_ascii_hex_bounded(input, page_number, stream_index, limit, control)
+        }
+        b"RunLengthDecode" | b"RL" => {
+            decode_run_length_bounded(input, page_number, stream_index, limit, control)
         }
         _ => Err(ExtractError::ContentDecode {
             reason: format!(
@@ -100,18 +121,33 @@ fn decode_zlib_bounded(
     page_number: PageNumber,
     stream_index: u32,
     limit: usize,
+    control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
     if input.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut decoder = ZlibDecoder::new(input);
-    match read_to_limit(&mut decoder, limit, page_number, stream_index) {
+    match read_to_limit(
+        &mut decoder,
+        limit,
+        page_number,
+        stream_index,
+        "decode_zlib",
+        control,
+    ) {
         Ok(output) => Ok(output),
         Err(zlib_error) => {
             let mut fallback_decoder = DeflateDecoder::new(input.get(2..).unwrap_or_default());
-            read_to_limit(&mut fallback_decoder, limit, page_number, stream_index)
-                .map_err(|_| zlib_error)
+            read_to_limit(
+                &mut fallback_decoder,
+                limit,
+                page_number,
+                stream_index,
+                "decode_deflate_fallback",
+                control,
+            )
+            .map_err(|_| zlib_error)
         }
     }
 }
@@ -122,8 +158,10 @@ fn decode_lzw_bounded(
     page_number: PageNumber,
     stream_index: u32,
     limit: usize,
+    control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
     const MIN_BITS: u8 = 9;
+    control.checkpoint("decode_lzw", Some(page_number))?;
 
     let early_change = params
         .and_then(|dict| dict.get(b"EarlyChange").ok())
@@ -162,6 +200,7 @@ fn decode_ascii85_bounded(
     page_number: PageNumber,
     stream_index: u32,
     limit: usize,
+    control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
     let mut output = Vec::new();
     let mut buffer: u32 = 0;
@@ -174,6 +213,8 @@ fn decode_ascii85_bounded(
     };
 
     for &character in input_no_eod {
+        control.checkpoint("decode_ascii85", Some(page_number))?;
+
         if character == b'z' {
             if count != 0 {
                 return Err(ExtractError::ContentDecode {
@@ -238,6 +279,104 @@ fn decode_ascii85_bounded(
     Ok(output)
 }
 
+fn decode_ascii_hex_bounded(
+    input: &[u8],
+    page_number: PageNumber,
+    stream_index: u32,
+    limit: usize,
+    control: &ExtractionControl,
+) -> Result<Vec<u8>, ExtractError> {
+    let mut output = Vec::new();
+    let mut upper_nibble: Option<u8> = None;
+
+    for &byte in input {
+        control.checkpoint("decode_ascii_hex", Some(page_number))?;
+
+        if byte == b'>' {
+            break;
+        }
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+
+        let nibble = ascii_hex_nibble(byte).ok_or(ExtractError::ContentDecode {
+            reason: "invalid ASCIIHex stream".to_string(),
+        })?;
+
+        if let Some(upper) = upper_nibble.take() {
+            push_with_limit(
+                &mut output,
+                &[(upper << 4) | nibble],
+                limit,
+                page_number,
+                stream_index,
+            )?;
+        } else {
+            upper_nibble = Some(nibble);
+        }
+    }
+
+    if let Some(upper) = upper_nibble {
+        push_with_limit(&mut output, &[upper << 4], limit, page_number, stream_index)?;
+    }
+
+    Ok(output)
+}
+
+fn decode_run_length_bounded(
+    input: &[u8],
+    page_number: PageNumber,
+    stream_index: u32,
+    limit: usize,
+    control: &ExtractionControl,
+) -> Result<Vec<u8>, ExtractError> {
+    let mut output = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < input.len() {
+        control.checkpoint("decode_run_length", Some(page_number))?;
+
+        let length_byte = input[cursor];
+        cursor = cursor.saturating_add(1);
+
+        if length_byte == 128 {
+            break;
+        }
+
+        if length_byte <= 127 {
+            let run_length = usize::from(length_byte).saturating_add(1);
+            let end = cursor.saturating_add(run_length);
+            let bytes = input.get(cursor..end).ok_or(ExtractError::ContentDecode {
+                reason: "truncated RunLength literal run".to_string(),
+            })?;
+            push_with_limit(&mut output, bytes, limit, page_number, stream_index)?;
+            cursor = end;
+            continue;
+        }
+
+        let repeat = usize::from(257_u16.saturating_sub(u16::from(length_byte)));
+        let value = *input.get(cursor).ok_or(ExtractError::ContentDecode {
+            reason: "truncated RunLength repeat run".to_string(),
+        })?;
+        cursor = cursor.saturating_add(1);
+
+        for _ in 0..repeat {
+            push_with_limit(&mut output, &[value], limit, page_number, stream_index)?;
+        }
+    }
+
+    Ok(output)
+}
+
+fn ascii_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn push_with_limit(
     output: &mut Vec<u8>,
     bytes: &[u8],
@@ -263,11 +402,15 @@ fn read_to_limit<R: Read>(
     limit: usize,
     page_number: PageNumber,
     stream_index: u32,
+    checkpoint_stage: &'static str,
+    control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
     let mut output = Vec::new();
     let mut chunk = [0_u8; 8 * 1024];
 
     loop {
+        control.checkpoint(checkpoint_stage, Some(page_number))?;
+
         let read = reader
             .read(&mut chunk)
             .map_err(|error| ExtractError::ContentDecode {
@@ -341,3 +484,6 @@ impl Write for LimitedWriter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

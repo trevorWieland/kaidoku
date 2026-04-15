@@ -43,6 +43,9 @@ Generate baseline benchmark output:
 just phase1-bench
 ```
 
+`phase1-bench` and `phase1-gate` run benchmarks with `--release` and capture host metadata
+(OS/arch/cores/profile/rustc/governor when available) in the benchmark report.
+
 Refresh the committed benchmark baseline after approved parser/benchmark methodology changes:
 
 ```bash
@@ -53,4 +56,10 @@ Run the full Phase 1 parser gate locally:
 
 ```bash
 just phase1-gate
+```
+
+Run short local fuzz smoke checks for hostile input paths:
+
+```bash
+just phase1-fuzz-smoke
 ```

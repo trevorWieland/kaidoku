@@ -1,0 +1,35 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-smoke:
+    name: Fuzz Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: taiki-e/install-action@cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Decode filters target
+        working-directory: fuzz
+        run: cargo fuzz run decode_filters -- -max_total_time=60
+
+      - name: Content ops target
+        working-directory: fuzz
+        run: cargo fuzz run content_ops -- -max_total_time=60
+
+      - name: Geometry normalization target
+        working-directory: fuzz
+        run: cargo fuzz run geometry_normalization -- -max_total_time=60

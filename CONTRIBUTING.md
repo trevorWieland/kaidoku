@@ -25,3 +25,4 @@ Parser-adapter changes are incomplete unless all of the following are true:
   - `doclaynet_mixed_content.pdf`
 - Corpus, provenance manifest, goldens, and benchmark baseline remain in strict parity.
 - Golden and benchmark baseline files are committed when behavior or performance baseline changes.
+- Fuzz smoke targets are exercised for hostile-input paths (`just phase1-fuzz-smoke`) before merge when parser internals are touched.

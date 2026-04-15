@@ -10,28 +10,51 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 #[test]
-fn extract_happy_path_writes_expected_artifact() {
+fn extract_happy_path_matches_committed_goldens_exactly() {
+    let fixtures = [
+        "doclaynet_simple_text.pdf",
+        "doclaynet_multi_column.pdf",
+        "doclaynet_mixed_content.pdf",
+    ];
+
     let output_dir = tempdir().expect("temp output dir");
-    let fixture_path = fixture("doclaynet_simple_text.pdf");
+    for fixture_name in fixtures {
+        let fixture_path = fixture(fixture_name);
+        Command::cargo_bin("kaidoku-cli")
+            .expect("cli binary")
+            .args([
+                "extract",
+                "--input",
+                fixture_path.to_str().expect("fixture path"),
+                "--output",
+                output_dir.path().to_str().expect("output path"),
+            ])
+            .assert()
+            .success();
 
-    Command::cargo_bin("kaidoku-cli")
-        .expect("cli binary")
-        .args([
-            "extract",
-            "--input",
-            fixture_path.to_str().expect("fixture path"),
-            "--output",
-            output_dir.path().to_str().expect("output path"),
-        ])
-        .assert()
-        .success();
-
-    let output_file = output_dir.path().join("doclaynet_simple_text.json");
-    assert!(output_file.exists(), "missing expected output artifact");
-
-    let json = fs::read_to_string(output_file).expect("output json");
-    assert!(json.contains("\"schema_version\""));
-    assert!(json.contains("\"pages\""));
+        let output_file = output_dir.path().join(
+            fixture_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| format!("{stem}.json"))
+                .expect("fixture stem"),
+        );
+        let golden_file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/golden/phase1")
+            .join(
+                fixture_path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(|stem| format!("{stem}.json"))
+                    .expect("golden stem"),
+            );
+        let actual = fs::read_to_string(output_file).expect("output json");
+        let expected = fs::read_to_string(golden_file).expect("golden json");
+        assert_eq!(
+            actual, expected,
+            "cli output drift for fixture {fixture_name}",
+        );
+    }
 }
 
 #[test]
@@ -65,6 +88,26 @@ fn extract_invalid_pages_spec_exits_nonzero() {
             "--output",
             output_dir.path().to_str().expect("output path"),
             "--pages",
+            "0",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn extract_invalid_timeout_option_exits_nonzero() {
+    let output_dir = tempdir().expect("temp output dir");
+    let fixture_path = fixture("doclaynet_simple_text.pdf");
+
+    Command::cargo_bin("kaidoku-cli")
+        .expect("cli binary")
+        .args([
+            "extract",
+            "--input",
+            fixture_path.to_str().expect("fixture path"),
+            "--output",
+            output_dir.path().to_str().expect("output path"),
+            "--max-wall-time-ms",
             "0",
         ])
         .assert()

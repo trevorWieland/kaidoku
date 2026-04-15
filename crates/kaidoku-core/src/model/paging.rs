@@ -3,44 +3,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeSet;
 use thiserror::Error;
 
-const DEFAULT_COORDINATE_PRECISION: u8 = 3;
-
-pub const fn default_max_input_bytes() -> usize {
-    64 * 1024 * 1024
-}
-
-pub const fn default_max_pages() -> u32 {
-    10_000
-}
-
-pub const fn default_max_operations_per_page() -> u32 {
-    250_000
-}
-
-pub const fn default_max_elements_per_page() -> u32 {
-    2_000_000
-}
-
-pub const fn default_max_content_stream_bytes() -> usize {
-    32 * 1024 * 1024
-}
-
-pub const fn default_max_total_decoded_stream_bytes() -> usize {
-    128 * 1024 * 1024
-}
-
-pub const fn default_max_page_tree_depth() -> usize {
-    128
-}
-
-pub const fn default_max_form_xobject_depth() -> usize {
-    16
-}
-
-pub const fn default_max_form_xobject_visits() -> usize {
-    2048
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ParseBackend {
@@ -229,47 +191,9 @@ impl PageSelection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtractOptions {
-    pub backend: ParseBackend,
-    pub page_selection: PageSelection,
-    pub coordinate_precision: u8,
-    pub max_input_bytes: usize,
-    pub max_pages: u32,
-    pub max_operations_per_page: u32,
-    pub max_elements_per_page: u32,
-    pub max_content_stream_bytes: usize,
-    pub max_total_decoded_stream_bytes: usize,
-    pub max_page_tree_depth: usize,
-    pub max_form_xobject_depth: usize,
-    pub max_form_xobject_visits: usize,
-}
-
-impl Default for ExtractOptions {
-    fn default() -> Self {
-        Self {
-            backend: ParseBackend::default(),
-            page_selection: PageSelection::All,
-            coordinate_precision: DEFAULT_COORDINATE_PRECISION,
-            max_input_bytes: default_max_input_bytes(),
-            max_pages: default_max_pages(),
-            max_operations_per_page: default_max_operations_per_page(),
-            max_elements_per_page: default_max_elements_per_page(),
-            max_content_stream_bytes: default_max_content_stream_bytes(),
-            max_total_decoded_stream_bytes: default_max_total_decoded_stream_bytes(),
-            max_page_tree_depth: default_max_page_tree_depth(),
-            max_form_xobject_depth: default_max_form_xobject_depth(),
-            max_form_xobject_visits: default_max_form_xobject_visits(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        ExplicitPageSelection, ExtractOptions, PageRange, PageRangeError, PageSelection,
-        ParseBackend,
-    };
+    use super::{ExplicitPageSelection, PageRange, PageRangeError, PageSelection, ParseBackend};
     use crate::ExtractError;
     use serde_json::{from_str, to_string};
 
@@ -385,17 +309,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_backend_and_extract_options_defaults_are_stable() {
+    fn parse_backend_serialization_is_stable() {
         let backend_json = to_string(&ParseBackend::Lopdf);
         assert!(matches!(backend_json, Ok(ref json) if json == "\"lopdf\""));
-
-        let defaults = ExtractOptions::default();
-        assert_eq!(defaults.backend, ParseBackend::Lopdf);
-        assert_eq!(defaults.coordinate_precision, 3);
-        assert!(defaults.max_content_stream_bytes > 0);
-        assert!(defaults.max_total_decoded_stream_bytes >= defaults.max_content_stream_bytes);
-        assert!(defaults.max_page_tree_depth > 0);
-        assert!(defaults.max_form_xobject_depth > 0);
-        assert!(defaults.max_form_xobject_visits > 0);
     }
 }

@@ -10,6 +10,10 @@ description = "Core primitives for kaidoku PDF deciphering pipeline"
 [lints]
 workspace = true
 
+[features]
+default = []
+fuzzing = []
+
 [dependencies]
 flate2 = "1"
 lopdf = { workspace = true }

@@ -28,6 +28,8 @@ struct ExtractCommand {
     pages: Option<String>,
     #[arg(long, default_value_t = 1)]
     jobs: usize,
+    #[arg(long, default_value_t = kaidoku_core::default_max_wall_time_ms())]
+    max_wall_time_ms: u64,
 }
 
 #[derive(Debug, Args)]

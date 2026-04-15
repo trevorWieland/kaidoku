@@ -6,16 +6,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod regression;
 
 const BENCH_SCHEMA_VERSION: &str = "kaidoku.phase1.bench.v3";
-const THROUGHPUT_MAX_REGRESSION_RATIO: f64 = 0.25;
-const LATENCY_MAX_REGRESSION_RATIO: f64 = 0.25;
-const NOISE_SIGMA_MULTIPLIER: f64 = 2.5;
-const REGRESSION_PROBABILITY_THRESHOLD: f64 = 0.70;
-const REGRESSION_EFFECT_SIZE_FLOOR: f64 = 0.10;
+const THROUGHPUT_MAX_REGRESSION_RATIO: f64 = 0.15;
+const LATENCY_MAX_REGRESSION_RATIO: f64 = 0.15;
+const NOISE_SIGMA_MULTIPLIER: f64 = 2.0;
+const REGRESSION_PROBABILITY_THRESHOLD: f64 = 0.65;
+const REGRESSION_EFFECT_SIZE_FLOOR: f64 = 0.05;
+const FULL_LATENCY_ABSOLUTE_MS_SLACK: f64 = 8.0;
+const FIRST_PAGE_LATENCY_ABSOLUTE_MS_SLACK: f64 = 6.0;
+const THROUGHPUT_ABSOLUTE_MIB_DELTA: f64 = 1.0;
 const BYTES_PER_MIB: f64 = 1024.0 * 1024.0;
 const REQUIRED_PHASE1_FIXTURES: [&str; 3] = [
     "doclaynet_simple_text.pdf",
@@ -26,9 +32,22 @@ const REQUIRED_PHASE1_FIXTURES: [&str; 3] = [
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BenchReport {
     schema_version: String,
+    environment: BenchEnvironment,
     calibration: RuntimeCalibration,
     fixtures: Vec<FixtureBenchResult>,
     checks: BenchChecks,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct BenchEnvironment {
+    generated_at_unix_seconds: u64,
+    os: String,
+    arch: String,
+    cpu_logical_cores: usize,
+    profile: String,
+    rustc_version: String,
+    hostname: Option<String>,
+    cpu_governor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +62,9 @@ struct BenchChecks {
     warmup_iterations: u32,
     throughput_max_regression_ratio: f64,
     latency_max_regression_ratio: f64,
+    throughput_absolute_mib_delta: f64,
+    full_latency_absolute_ms_slack: f64,
+    first_page_latency_absolute_ms_slack: f64,
     noise_sigma_multiplier: f64,
     regression_probability_threshold: f64,
     regression_effect_size_floor: f64,
@@ -90,12 +112,16 @@ fn run_phase1_bench(command: &Phase1BenchCommand) -> Result<()> {
 
     let report = BenchReport {
         schema_version: BENCH_SCHEMA_VERSION.to_string(),
+        environment: benchmark_environment(),
         calibration,
         fixtures: results,
         checks: BenchChecks {
             warmup_iterations: command.warmup_iterations,
             throughput_max_regression_ratio: THROUGHPUT_MAX_REGRESSION_RATIO,
             latency_max_regression_ratio: LATENCY_MAX_REGRESSION_RATIO,
+            throughput_absolute_mib_delta: THROUGHPUT_ABSOLUTE_MIB_DELTA,
+            full_latency_absolute_ms_slack: FULL_LATENCY_ABSOLUTE_MS_SLACK,
+            first_page_latency_absolute_ms_slack: FIRST_PAGE_LATENCY_ABSOLUTE_MS_SLACK,
             noise_sigma_multiplier: NOISE_SIGMA_MULTIPLIER,
             regression_probability_threshold: REGRESSION_PROBABILITY_THRESHOLD,
             regression_effect_size_floor: REGRESSION_EFFECT_SIZE_FLOOR,
@@ -151,6 +177,51 @@ fn benchmark_runtime_calibration(
         mad_probe_ms: round_metric(mad(&probe_runs, median_probe_ms)),
         probe_ms_samples: probe_runs.iter().copied().map(round_metric).collect(),
     })
+}
+
+fn benchmark_environment() -> BenchEnvironment {
+    BenchEnvironment {
+        generated_at_unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map_or(0, |duration| duration.as_secs()),
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        cpu_logical_cores: thread::available_parallelism().map_or(1, usize::from),
+        profile: if cfg!(debug_assertions) {
+            "debug".to_string()
+        } else {
+            "release".to_string()
+        },
+        rustc_version: rustc_version(),
+        hostname: hostname(),
+        cpu_governor: cpu_governor(),
+    }
+}
+
+fn rustc_version() -> String {
+    Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map_or_else(|| "unknown".to_string(), |value| value.trim().to_string())
+}
+
+fn hostname() -> Option<String> {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+}
+
+fn cpu_governor() -> Option<String> {
+    if std::env::consts::OS != "linux" {
+        return None;
+    }
+
+    fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+        .ok()
+        .map(|value| value.trim().to_string())
 }
 
 fn run_calibration_probe() {
@@ -242,10 +313,9 @@ fn run_full_extraction(bytes: &[u8], path: &Path) -> Result<()> {
 }
 
 fn run_first_page_extraction(bytes: &[u8], path: &Path) -> Result<()> {
-    let first_page_options = ExtractOptions {
-        page_selection: PageSelection::Range(PageRange::new(1, 1)?),
-        ..ExtractOptions::default()
-    };
+    let first_page_options = ExtractOptions::builder()
+        .page_selection(PageSelection::Range(PageRange::new(1, 1)?))
+        .build()?;
     let _first_page_doc = extract_pdf(bytes, first_page_options)
         .with_context(|| format!("first-page extraction failed for {}", path.display()))?;
     Ok(())

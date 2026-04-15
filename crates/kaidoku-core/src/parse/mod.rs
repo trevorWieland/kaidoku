@@ -1,4 +1,4 @@
-mod lopdf_backend;
+pub(crate) mod lopdf_backend;
 
 use crate::{ExtractError, ExtractOptions, ExtractionDocument, ParseBackend};
 use lopdf_backend::LopdfBackend;
@@ -15,7 +15,7 @@ pub(crate) fn extract_with_backend(
     input_bytes: &[u8],
     options: ExtractOptions,
 ) -> Result<ExtractionDocument, ExtractError> {
-    let backend = options.backend;
+    let backend = options.backend();
     BACKEND_REGISTRY
         .iter()
         .find(|entry| entry.kind == backend)

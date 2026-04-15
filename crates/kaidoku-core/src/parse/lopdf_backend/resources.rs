@@ -1,6 +1,7 @@
 use crate::{BBox, ExtractError, PageNumber};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ImageMetadata {
@@ -13,18 +14,40 @@ pub(super) struct ImageMetadata {
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct ResourceScope {
-    xobjects: HashMap<Vec<u8>, ObjectId>,
+    local_xobjects: Arc<HashMap<Vec<u8>, ObjectId>>,
+    parent: Option<Arc<ResourceScope>>,
 }
 
 impl ResourceScope {
     #[must_use]
     pub(super) fn resolve_xobject(&self, name: &[u8]) -> Option<ObjectId> {
-        self.xobjects.get(name).copied()
+        self.local_xobjects.get(name).copied().or_else(|| {
+            self.parent
+                .as_ref()
+                .and_then(|parent| parent.resolve_xobject(name))
+        })
+    }
+
+    fn from_local(xobjects: HashMap<Vec<u8>, ObjectId>) -> Self {
+        Self {
+            local_xobjects: Arc::new(xobjects),
+            parent: None,
+        }
+    }
+
+    fn with_parent(
+        local_xobjects: Arc<HashMap<Vec<u8>, ObjectId>>,
+        parent: &ResourceScope,
+    ) -> Self {
+        Self {
+            local_xobjects,
+            parent: Some(Arc::new(parent.clone())),
+        }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) struct PageGeometry {
+pub(crate) struct PageGeometry {
     crop_min_x: f64,
     crop_min_y: f64,
     rotate_deg: i32,
@@ -33,7 +56,7 @@ pub(super) struct PageGeometry {
 }
 
 impl PageGeometry {
-    pub(super) fn normalize_bbox(
+    pub(crate) fn normalize_bbox(
         self,
         bbox: BBox,
         precision: u8,
@@ -105,35 +128,43 @@ pub(super) fn page_resource_scope(
                 reason: error.to_string(),
             })?;
 
-    let mut scope = ResourceScope::default();
+    let mut local = HashMap::new();
 
     for resource_id in &resource_ids {
         if let Ok(dict) = document.get_dictionary(*resource_id) {
-            collect_xobjects(document, dict, &mut scope);
+            collect_xobjects(document, dict, &mut local);
         }
     }
 
     if let Some(dict) = resource_dict {
-        collect_xobjects(document, dict, &mut scope);
+        collect_xobjects(document, dict, &mut local);
     }
 
-    Ok(scope)
+    Ok(ResourceScope::from_local(local))
 }
 
 pub(super) fn form_resource_scope(
     document: &Document,
     parent: &ResourceScope,
+    form_object_id: ObjectId,
     form_stream: &Stream,
+    local_cache: &mut HashMap<ObjectId, Arc<HashMap<Vec<u8>, ObjectId>>>,
 ) -> ResourceScope {
-    let mut merged = parent.clone();
+    let local = if let Some(cached) = local_cache.get(&form_object_id) {
+        Arc::clone(cached)
+    } else {
+        let mut computed = HashMap::new();
+        if let Ok(resources_obj) = form_stream.dict.get_deref(b"Resources", document)
+            && let Ok(resources_dict) = resources_obj.as_dict()
+        {
+            collect_xobjects(document, resources_dict, &mut computed);
+        }
+        let computed = Arc::new(computed);
+        local_cache.insert(form_object_id, Arc::clone(&computed));
+        computed
+    };
 
-    if let Ok(resources_obj) = form_stream.dict.get_deref(b"Resources", document)
-        && let Ok(resources_dict) = resources_obj.as_dict()
-    {
-        collect_xobjects(document, resources_dict, &mut merged);
-    }
-
-    merged
+    ResourceScope::with_parent(local, parent)
 }
 
 pub(super) fn image_metadata_for_object(
@@ -198,7 +229,7 @@ pub(super) fn form_matrix(stream: &Stream) -> Option<[f64; 6]> {
     Some(values)
 }
 
-pub(super) fn page_geometry(
+pub(crate) fn page_geometry(
     document: &Document,
     page_number: PageNumber,
     page_id: ObjectId,
@@ -230,7 +261,12 @@ pub(super) fn page_geometry(
         });
     }
 
-    let rotate_deg = normalize_rotate(inherited.rotate_deg.unwrap_or(0));
+    let rotate_deg = normalize_rotate(
+        inherited.rotate_deg.unwrap_or(0),
+        page_number,
+        page_id.0,
+        page_id.1,
+    )?;
 
     let (width, height) = if rotate_deg == 90 || rotate_deg == 270 {
         (crop_height, crop_width)
@@ -247,9 +283,22 @@ pub(super) fn page_geometry(
     })
 }
 
-fn normalize_rotate(raw: i32) -> i32 {
+fn normalize_rotate(
+    raw: i32,
+    page_number: PageNumber,
+    page_object_number: u32,
+    page_object_generation: u16,
+) -> Result<i32, ExtractError> {
     let normalized = raw.rem_euclid(360);
-    normalized - (normalized % 90)
+    if normalized % 90 != 0 {
+        return Err(ExtractError::MalformedPageGeometry {
+            page_number: page_number.get(),
+            page_object_number,
+            page_object_generation,
+            reason: format!("page rotation must be a multiple of 90 degrees: {raw}"),
+        });
+    }
+    Ok(normalized)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -348,7 +397,11 @@ fn parse_box_array(value: &Object) -> Option<[f64; 4]> {
     Some([min_x, min_y, max_x, max_y])
 }
 
-fn collect_xobjects(document: &Document, resources: &Dictionary, scope: &mut ResourceScope) {
+fn collect_xobjects(
+    document: &Document,
+    resources: &Dictionary,
+    out: &mut HashMap<Vec<u8>, ObjectId>,
+) {
     let Ok(xobject) = resources.get_deref(b"XObject", document) else {
         return;
     };
@@ -374,7 +427,7 @@ fn collect_xobjects(document: &Document, resources: &Dictionary, scope: &mut Res
             .and_then(Object::as_name)
             .is_ok()
         {
-            scope.xobjects.insert(name.clone(), object_id);
+            out.insert(name.clone(), object_id);
         }
     }
 }

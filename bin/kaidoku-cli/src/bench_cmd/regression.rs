@@ -1,16 +1,15 @@
 use super::{
-    BenchReport, FixtureBenchResult, LATENCY_MAX_REGRESSION_RATIO, NOISE_SIGMA_MULTIPLIER,
+    BenchReport, FIRST_PAGE_LATENCY_ABSOLUTE_MS_SLACK, FULL_LATENCY_ABSOLUTE_MS_SLACK,
+    FixtureBenchResult, LATENCY_MAX_REGRESSION_RATIO, NOISE_SIGMA_MULTIPLIER,
     REGRESSION_EFFECT_SIZE_FLOOR, REGRESSION_PROBABILITY_THRESHOLD, RuntimeCalibration,
-    THROUGHPUT_MAX_REGRESSION_RATIO, median,
+    THROUGHPUT_ABSOLUTE_MIB_DELTA, THROUGHPUT_MAX_REGRESSION_RATIO,
 };
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) fn check_bench_regression(baseline: &BenchReport, current: &BenchReport) -> Result<()> {
     ensure_same_fixture_set(baseline, current)?;
-    let runtime_scale = runtime_scale_factor(&baseline.calibration, &current.calibration);
-    let fixture_scale = fixture_runtime_scale_factor(baseline, current);
-    let effective_scale = (runtime_scale * fixture_scale).clamp(0.5, 3.0);
+    let effective_scale = runtime_scale_factor(&baseline.calibration, &current.calibration);
     let baseline_map: BTreeMap<&str, &FixtureBenchResult> = baseline
         .fixtures
         .iter()
@@ -103,6 +102,20 @@ fn check_throughput_regression(
         &adjusted_current_samples,
         true,
     );
+    let throughput_noise_tolerance = (NOISE_SIGMA_MULTIPLIER
+        * (baseline_fixture.mad_throughput_mib_per_s + adjusted_current_mad))
+        .max(THROUGHPUT_ABSOLUTE_MIB_DELTA);
+    let absolute_floor =
+        (baseline_fixture.median_throughput_mib_per_s - throughput_noise_tolerance).max(0.0);
+    if adjusted_current_median < absolute_floor {
+        bail!(
+            "throughput absolute floor breach for {}: {:.3} MiB/s < {:.3} MiB/s (tolerance {:.3} MiB/s)",
+            current_fixture.fixture,
+            adjusted_current_median,
+            absolute_floor,
+            throughput_noise_tolerance,
+        );
+    }
     if drop > limit + REGRESSION_EFFECT_SIZE_FLOOR && probability > REGRESSION_PROBABILITY_THRESHOLD
     {
         bail!(
@@ -145,6 +158,15 @@ fn check_full_latency_regression(
         &adjusted_current_samples,
         false,
     );
+    let absolute_cap = baseline_fixture.median_full_ms + FULL_LATENCY_ABSOLUTE_MS_SLACK;
+    if adjusted_current_median > absolute_cap {
+        bail!(
+            "full extraction latency absolute cap breach for {}: {:.3} ms > {:.3} ms",
+            current_fixture.fixture,
+            adjusted_current_median,
+            absolute_cap,
+        );
+    }
     if increase > limit + REGRESSION_EFFECT_SIZE_FLOOR
         && probability > REGRESSION_PROBABILITY_THRESHOLD
     {
@@ -189,6 +211,15 @@ fn check_first_page_latency_regression(
         &adjusted_current_samples,
         false,
     );
+    let absolute_cap = baseline_fixture.median_first_page_ms + FIRST_PAGE_LATENCY_ABSOLUTE_MS_SLACK;
+    if adjusted_current_median > absolute_cap {
+        bail!(
+            "first-page latency absolute cap breach for {}: {:.3} ms > {:.3} ms",
+            current_fixture.fixture,
+            adjusted_current_median,
+            absolute_cap,
+        );
+    }
     if increase > limit + REGRESSION_EFFECT_SIZE_FLOOR
         && probability > REGRESSION_PROBABILITY_THRESHOLD
     {
@@ -268,32 +299,7 @@ fn runtime_scale_factor(baseline: &RuntimeCalibration, current: &RuntimeCalibrat
     if baseline.median_probe_ms <= f64::EPSILON || current.median_probe_ms <= f64::EPSILON {
         return 1.0;
     }
-    (current.median_probe_ms / baseline.median_probe_ms).clamp(0.5, 2.0)
-}
-
-fn fixture_runtime_scale_factor(baseline: &BenchReport, current: &BenchReport) -> f64 {
-    let baseline_map: BTreeMap<&str, &FixtureBenchResult> = baseline
-        .fixtures
-        .iter()
-        .map(|fixture| (fixture.fixture.as_str(), fixture))
-        .collect();
-
-    let mut ratios = current
-        .fixtures
-        .iter()
-        .filter_map(|fixture| {
-            baseline_map
-                .get(fixture.fixture.as_str())
-                .filter(|baseline_fixture| baseline_fixture.median_full_ms > f64::EPSILON)
-                .map(|baseline_fixture| fixture.median_full_ms / baseline_fixture.median_full_ms)
-        })
-        .collect::<Vec<_>>();
-
-    if ratios.is_empty() {
-        return 1.0;
-    }
-
-    median(&mut ratios).clamp(0.5, 2.5)
+    (current.median_probe_ms / baseline.median_probe_ms).clamp(0.75, 1.4)
 }
 
 fn scale_throughput(value: f64, runtime_scale: f64) -> f64 {
@@ -306,7 +312,11 @@ fn scale_latency(value: f64, runtime_scale: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{pairwise_regression_probability, regression_ratio, threshold_with_noise};
+    use super::{
+        check_first_page_latency_regression, check_throughput_regression,
+        pairwise_regression_probability, regression_ratio, threshold_with_noise,
+    };
+    use crate::bench_cmd::FixtureBenchResult;
     use crate::bench_cmd::validate_required_fixture_set;
     use std::collections::BTreeSet;
 
@@ -346,5 +356,41 @@ mod tests {
         let throughput_probability =
             pairwise_regression_probability(&baseline, &faster_current, true);
         assert!(throughput_probability > 0.95);
+    }
+
+    #[test]
+    fn absolute_throughput_floor_is_enforced() {
+        let baseline = sample_fixture("fixture", 20.0, 10.0);
+        let current = sample_fixture("fixture", 20.0, 6.5);
+        let result = check_throughput_regression(&baseline, &current, 1.0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn absolute_first_page_latency_cap_is_enforced() {
+        let baseline = sample_fixture("fixture", 20.0, 10.0);
+        let mut current = sample_fixture("fixture", 20.0, 10.0);
+        current.median_first_page_ms = 40.0;
+        current.first_page_ms_samples = vec![39.0, 40.0, 41.0];
+        let result = check_first_page_latency_regression(&baseline, &current, 1.0);
+        assert!(result.is_err());
+    }
+
+    fn sample_fixture(name: &str, first_page_ms: f64, throughput: f64) -> FixtureBenchResult {
+        FixtureBenchResult {
+            fixture: name.to_string(),
+            bytes: 1000,
+            warmup_iterations: 1,
+            iterations: 3,
+            median_full_ms: 20.0,
+            mad_full_ms: 0.5,
+            median_first_page_ms: first_page_ms,
+            mad_first_page_ms: 0.5,
+            median_throughput_mib_per_s: throughput,
+            mad_throughput_mib_per_s: 0.5,
+            full_ms_samples: vec![19.0, 20.0, 21.0],
+            first_page_ms_samples: vec![first_page_ms - 1.0, first_page_ms, first_page_ms + 1.0],
+            throughput_mib_per_s_samples: vec![throughput - 0.5, throughput, throughput + 0.5],
+        }
     }
 }

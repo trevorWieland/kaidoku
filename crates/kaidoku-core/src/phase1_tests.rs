@@ -1,4 +1,6 @@
-use crate::{ExtractError, ExtractOptions, ParseBackend, extract_pdf, to_canonical_json};
+use crate::{
+    CancellationToken, ExtractError, ExtractOptions, ParseBackend, extract_pdf, to_canonical_json,
+};
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -267,10 +269,10 @@ fn decoded_text_avoids_control_character_gibberish() {
 
 #[test]
 fn input_size_limit_rejects_oversized_payloads() {
-    let options = ExtractOptions {
-        max_input_bytes: 1,
-        ..ExtractOptions::default()
-    };
+    let options = ExtractOptions::builder()
+        .max_input_bytes(1)
+        .build()
+        .expect("options");
 
     let err = extract_pdf(&[1_u8, 2_u8], options).expect_err("oversized payload must fail early");
     assert!(matches!(
@@ -286,14 +288,29 @@ fn input_size_limit_rejects_oversized_payloads() {
 fn explicit_lopdf_backend_selection_is_supported() {
     let fixture_path = corpus_dir().join("doclaynet_simple_text.pdf");
     let bytes = fs::read(&fixture_path).expect("fixture must be readable");
-    let options = ExtractOptions {
-        backend: ParseBackend::Lopdf,
-        ..ExtractOptions::default()
-    };
+    let options = ExtractOptions::builder()
+        .backend(ParseBackend::Lopdf)
+        .build()
+        .expect("options");
 
     let document =
         extract_pdf(&bytes, options).expect("explicit backend extraction should succeed");
     assert!(!document.pages.is_empty());
+}
+
+#[test]
+fn cooperative_cancellation_token_short_circuits_extraction() {
+    let fixture_path = corpus_dir().join("doclaynet_simple_text.pdf");
+    let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+    let token = CancellationToken::new();
+    token.cancel();
+    let options = ExtractOptions::builder()
+        .cancellation_token(token)
+        .build()
+        .expect("options");
+
+    let error = extract_pdf(&bytes, options).expect_err("cancelled extraction must fail");
+    assert!(matches!(error, ExtractError::ExtractionCancelled { .. }));
 }
 
 fn required_fixture_set() -> BTreeSet<String> {

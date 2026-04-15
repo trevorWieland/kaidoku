@@ -1,21 +1,25 @@
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 mod model;
 mod parse;
 
 pub use model::{
-    BBox, CharPayload, ExtractOptions, ExtractionDocument, ExtractionPage, ExtractionSource,
-    ImagePayload, PageNumber, PageRange, PageRangeError, PageSelection, ParseBackend, RawElement,
-    SourceRef, SpanPayload, ValidationError, default_max_content_stream_bytes,
-    default_max_elements_per_page, default_max_form_xobject_depth, default_max_form_xobject_visits,
-    default_max_input_bytes, default_max_operations_per_page, default_max_page_tree_depth,
-    default_max_pages, default_max_total_decoded_stream_bytes,
+    BBox, BackendIdentifier, CancellationToken, CharPayload, ExtractOptions, ExtractOptionsError,
+    ExtractionDocument, ExtractionPage, ExtractionSource, FontDescriptor, FontId, ImagePayload,
+    PageNumber, PageRange, PageRangeError, PageSelection, ParseBackend, RawElement,
+    SchemaIdentifier, Sha256Digest, SourceRef, SpanPayload, ValidationError,
+    default_max_content_stream_bytes, default_max_elements_per_page,
+    default_max_form_xobject_depth, default_max_form_xobject_visits, default_max_input_bytes,
+    default_max_operations_per_page, default_max_page_tree_depth, default_max_pages,
+    default_max_total_decoded_stream_bytes, default_max_wall_time_ms,
 };
 
 use parse::extract_with_backend;
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: &str = "kaidoku.phase1.v2";
-pub const BACKEND_ID: &str = "lopdf";
+pub const SCHEMA_VERSION: SchemaIdentifier = SchemaIdentifier::Phase1V2;
+pub const BACKEND_ID: BackendIdentifier = BackendIdentifier::Lopdf;
 
 #[derive(Debug, Error)]
 pub enum ExtractError {
@@ -113,6 +117,20 @@ pub enum ExtractError {
         limit: usize,
         actual: usize,
     },
+    #[error(
+        "extraction timeout exceeded at stage {stage} after {elapsed_ms}ms (limit {timeout_ms}ms)"
+    )]
+    ExtractionTimeoutExceeded {
+        page_number: Option<u32>,
+        stage: &'static str,
+        timeout_ms: u64,
+        elapsed_ms: u64,
+    },
+    #[error("extraction cancelled at stage {stage}")]
+    ExtractionCancelled {
+        page_number: Option<u32>,
+        stage: &'static str,
+    },
     #[error("invalid fallback geometry for page {page_number}: {reason}")]
     InvalidFallbackGeometry { page_number: u32, reason: String },
     #[error("invariant violated: {reason}")]
@@ -125,9 +143,9 @@ pub fn extract_pdf(
     input_bytes: &[u8],
     options: ExtractOptions,
 ) -> Result<ExtractionDocument, ExtractError> {
-    if input_bytes.len() > options.max_input_bytes {
+    if input_bytes.len() > options.max_input_bytes() {
         return Err(ExtractError::InputTooLarge {
-            limit_bytes: options.max_input_bytes,
+            limit_bytes: options.max_input_bytes(),
             actual_bytes: input_bytes.len(),
         });
     }

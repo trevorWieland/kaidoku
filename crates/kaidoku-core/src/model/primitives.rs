@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::num::NonZeroU32;
 use thiserror::Error;
 
@@ -10,6 +10,14 @@ pub enum ValidationError {
     NegativeDimension,
     #[error("page number must be >= 1")]
     InvalidPageNumber,
+    #[error("font id must be >= 1")]
+    InvalidFontId,
+    #[error("schema identifier is invalid")]
+    InvalidSchemaIdentifier,
+    #[error("backend identifier is invalid")]
+    InvalidBackendIdentifier,
+    #[error("sha256 digest must be lowercase hex with exactly 64 characters")]
+    InvalidSha256Digest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -27,6 +35,141 @@ impl PageNumber {
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0.get()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct FontId(NonZeroU32);
+
+impl FontId {
+    pub fn new(value: u32) -> Result<Self, ValidationError> {
+        let Some(number) = NonZeroU32::new(value) else {
+            return Err(ValidationError::InvalidFontId);
+        };
+        Ok(Self(number))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaIdentifier {
+    Phase1V2,
+}
+
+impl SchemaIdentifier {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Phase1V2 => "kaidoku.phase1.v2",
+        }
+    }
+}
+
+impl Serialize for SchemaIdentifier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SchemaIdentifier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "kaidoku.phase1.v2" => Ok(Self::Phase1V2),
+            _ => Err(serde::de::Error::custom(
+                ValidationError::InvalidSchemaIdentifier,
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendIdentifier {
+    Lopdf,
+}
+
+impl BackendIdentifier {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lopdf => "lopdf",
+        }
+    }
+}
+
+impl Serialize for BackendIdentifier {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for BackendIdentifier {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "lopdf" => Ok(Self::Lopdf),
+            _ => Err(serde::de::Error::custom(
+                ValidationError::InvalidBackendIdentifier,
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sha256Digest(String);
+
+impl Sha256Digest {
+    pub fn new(value: impl Into<String>) -> Result<Self, ValidationError> {
+        let value = value.into();
+        let valid = value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !valid {
+            return Err(ValidationError::InvalidSha256Digest);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for Sha256Digest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Sha256Digest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -106,7 +249,7 @@ impl BBox {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CharPayload {
     pub text: String,
-    pub font_name: Option<String>,
+    pub font_id: Option<FontId>,
     pub font_size: f64,
     pub char_index: u32,
 }
@@ -114,7 +257,7 @@ pub struct CharPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpanPayload {
     pub text: String,
-    pub font_name: Option<String>,
+    pub font_id: Option<FontId>,
     pub font_size: f64,
 }
 
@@ -125,6 +268,12 @@ pub struct ImagePayload {
     pub height_px: u32,
     pub color_space: Option<String>,
     pub bits_per_component: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FontDescriptor {
+    pub id: FontId,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -325,15 +474,16 @@ pub struct ExtractionPage {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractionSource {
-    pub backend: String,
-    pub input_sha256: String,
+    pub backend: BackendIdentifier,
+    pub input_sha256: Sha256Digest,
     pub input_bytes: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtractionDocument {
-    pub schema_version: String,
+    pub schema_version: SchemaIdentifier,
     pub source: ExtractionSource,
+    pub fonts: Vec<FontDescriptor>,
     pub pages: Vec<ExtractionPage>,
 }
 
@@ -343,136 +493,4 @@ fn quantize(value: f64, precision: u8) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        BBox, CharPayload, ImagePayload, RawElement, SourceRef, SpanPayload, ValidationError,
-    };
-    use serde_json::from_str;
-
-    #[test]
-    fn bbox_rejects_invalid_values() {
-        let invalid_width = BBox::new(0.0, 0.0, -1.0, 1.0);
-        assert_eq!(invalid_width, Err(ValidationError::NegativeDimension));
-
-        let invalid_nan = BBox::new(f64::NAN, 0.0, 1.0, 1.0);
-        assert_eq!(invalid_nan, Err(ValidationError::NonFiniteCoordinate));
-    }
-
-    #[test]
-    fn source_ref_stable_key_is_deterministic() {
-        let source_ref = SourceRef::new(1, 12, 0, 0, 9, 3);
-        assert!(source_ref.is_ok());
-
-        let Ok(source_ref) = source_ref else { return };
-        assert_eq!(source_ref.stable_key(), "p1-o9-s0-i3");
-    }
-
-    #[test]
-    fn page_number_and_source_ref_deserialize_paths_are_validated() {
-        let invalid_page = SourceRef::new(0, 1, 0, 0, 0, 0);
-        assert_eq!(invalid_page, Err(ValidationError::InvalidPageNumber));
-
-        let parsed = from_str::<SourceRef>(
-            r#"{
-                "page_number": 3,
-                "page_object_number": 12,
-                "page_object_generation": 0,
-                "stream_index": 2,
-                "operation_index": 7,
-                "element_index": 4
-            }"#,
-        );
-        assert!(parsed.is_ok());
-
-        let Ok(parsed) = parsed else { return };
-        assert_eq!(parsed.page_number().get(), 3);
-        assert_eq!(parsed.page_object_number(), 12);
-        assert_eq!(parsed.page_object_generation(), 0);
-        assert_eq!(parsed.stream_index(), 2);
-        assert_eq!(parsed.operation_index(), 7);
-        assert_eq!(parsed.element_index(), 4);
-
-        let invalid = from_str::<SourceRef>(
-            r#"{
-                "page_number": 0,
-                "page_object_number": 12,
-                "page_object_generation": 0,
-                "stream_index": 2,
-                "operation_index": 7,
-                "element_index": 4
-            }"#,
-        );
-        assert!(invalid.is_err());
-    }
-
-    #[test]
-    fn bbox_deserialize_and_quantize_cover_accessors() {
-        let parsed = from_str::<BBox>(r#"{"x":1.2349,"y":-0.0101,"width":4.4449,"height":9.9951}"#);
-        assert!(parsed.is_ok());
-        let Ok(parsed) = parsed else { return };
-
-        let quantized = parsed.quantized(2);
-        assert!((quantized.x() - 1.23).abs() < f64::EPSILON);
-        assert!((quantized.y() + 0.01).abs() < f64::EPSILON);
-        assert!((quantized.width() - 4.44).abs() < f64::EPSILON);
-        assert!((quantized.height() - 10.0).abs() < f64::EPSILON);
-
-        let invalid = from_str::<BBox>(r#"{"x":1.0,"y":2.0,"width":-1.0,"height":2.0}"#);
-        assert!(invalid.is_err());
-    }
-
-    #[test]
-    fn raw_element_variant_accessors_are_type_safe() {
-        let bbox = BBox::new(0.0, 1.0, 2.0, 3.0);
-        assert!(bbox.is_ok());
-        let Ok(bbox) = bbox else { return };
-
-        let source_ref = SourceRef::new(1, 9, 0, 2, 3, 4);
-        assert!(source_ref.is_ok());
-        let Ok(source_ref) = source_ref else { return };
-
-        let char_element = RawElement::char(
-            bbox,
-            source_ref,
-            CharPayload {
-                text: "A".to_string(),
-                font_name: Some("F1".to_string()),
-                font_size: 12.0,
-                char_index: 0,
-            },
-        );
-        assert!(char_element.char_payload().is_some());
-        assert!(char_element.span_payload().is_none());
-        assert!(char_element.image_payload().is_none());
-        assert_eq!(char_element.bbox(), bbox);
-        assert_eq!(char_element.source_ref(), source_ref);
-
-        let span_element = RawElement::span(
-            bbox,
-            source_ref,
-            SpanPayload {
-                text: "AB".to_string(),
-                font_name: None,
-                font_size: 10.0,
-            },
-        );
-        assert!(span_element.char_payload().is_none());
-        assert!(span_element.span_payload().is_some());
-        assert!(span_element.image_payload().is_none());
-
-        let image_element = RawElement::image(
-            bbox,
-            source_ref,
-            ImagePayload {
-                name: "Im1".to_string(),
-                width_px: 16,
-                height_px: 8,
-                color_space: Some("DeviceRGB".to_string()),
-                bits_per_component: Some(8),
-            },
-        );
-        assert!(image_element.char_payload().is_none());
-        assert!(image_element.span_payload().is_none());
-        assert!(image_element.image_payload().is_some());
-    }
-}
+mod tests;

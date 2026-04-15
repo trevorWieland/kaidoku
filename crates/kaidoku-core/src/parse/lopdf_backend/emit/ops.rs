@@ -140,8 +140,17 @@ fn handle_xobject_invocation(
         return Ok(());
     }
 
+    runtime
+        .control
+        .checkpoint("form_xobject_enter", Some(context.page_number()))?;
     runtime.traversal.enter(object_id)?;
-    let child_scope = resources::form_resource_scope(runtime.document, scope, stream);
+    let child_scope = resources::form_resource_scope(
+        runtime.document,
+        scope,
+        object_id,
+        stream,
+        runtime.form_scope_cache,
+    );
     let form_matrix =
         resources::form_matrix(stream).map_or_else(Matrix::identity, Matrix::from_values);
     let mut form_text_state = TextState::default();

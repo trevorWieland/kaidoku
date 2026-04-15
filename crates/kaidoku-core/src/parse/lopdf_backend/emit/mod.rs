@@ -1,4 +1,5 @@
-mod decode;
+mod control;
+pub(crate) mod decode;
 mod fonts;
 mod matrix;
 mod ops;
@@ -10,11 +11,15 @@ mod tests_limits;
 mod text;
 
 use super::resources::{self, PageGeometry, ResourceScope};
-use crate::{BBox, ExtractError, ImagePayload, PageNumber, RawElement, SourceRef};
+use crate::{BBox, ExtractError, FontId, ImagePayload, PageNumber, RawElement, SourceRef};
 use fonts::FontCatalog;
 use lopdf::{Document, Object, ObjectId, Stream, content::Content};
 use state::{GraphicsState, TextState};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+pub(crate) use control::ExtractionControl;
+pub(super) use control::FontRegistry;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OperationCursor {
@@ -41,6 +46,7 @@ pub(super) struct EmitContext<'a> {
     coordinate_precision: u8,
     page_geometry: PageGeometry,
     font_catalog: &'a FontCatalog<'a>,
+    font_registry: &'a mut FontRegistry,
     max_elements_per_page: u32,
     out: &'a mut Vec<RawElement>,
 }
@@ -61,6 +67,7 @@ pub(super) struct PageEmitConfig<'a> {
     pub(super) page_geometry: PageGeometry,
     pub(super) root_scope: &'a ResourceScope,
     pub(super) limits: ExtractionLimits,
+    pub(super) control: &'a ExtractionControl,
 }
 
 #[derive(Debug)]
@@ -79,6 +86,8 @@ struct ProcessRuntime<'a> {
     next_stream_index: &'a mut u32,
     traversal: &'a mut FormTraversal,
     remaining_decoded_budget: &'a mut usize,
+    control: &'a ExtractionControl,
+    form_scope_cache: &'a mut HashMap<ObjectId, Arc<HashMap<Vec<u8>, ObjectId>>>,
 }
 
 impl FormTraversal {
@@ -130,6 +139,16 @@ impl FormTraversal {
 impl EmitContext<'_> {
     pub(super) const fn page_number(&self) -> PageNumber {
         self.page_number
+    }
+
+    pub(super) fn intern_font_id(
+        &mut self,
+        font_key: Option<&[u8]>,
+    ) -> Result<Option<FontId>, ExtractError> {
+        let Some(font_name) = self.font_catalog.display_name(font_key) else {
+            return Ok(None);
+        };
+        Ok(Some(self.font_registry.intern(font_name)?))
     }
 
     fn source_ref(
@@ -235,8 +254,13 @@ pub(super) fn extract_page_elements(
     page_number: PageNumber,
     page_id: ObjectId,
     config: PageEmitConfig<'_>,
+    font_registry: &mut FontRegistry,
     remaining_decoded_budget: &mut usize,
 ) -> Result<Vec<RawElement>, ExtractError> {
+    config
+        .control
+        .checkpoint("extract_page_elements_start", Some(page_number))?;
+
     let mut elements = Vec::new();
     let font_catalog = FontCatalog::from_page(document, page_id)?;
 
@@ -247,6 +271,7 @@ pub(super) fn extract_page_elements(
         coordinate_precision: config.coordinate_precision,
         page_geometry: config.page_geometry,
         font_catalog: &font_catalog,
+        font_registry,
         max_elements_per_page: config.limits.max_elements,
         out: &mut elements,
     };
@@ -259,6 +284,7 @@ pub(super) fn extract_page_elements(
         config.limits.max_form_depth,
         config.limits.max_form_visits,
     );
+    let mut form_scope_cache: HashMap<ObjectId, Arc<HashMap<Vec<u8>, ObjectId>>> = HashMap::new();
 
     let mut page_text_state = TextState::default();
     let mut page_graphics_state = GraphicsState::default();
@@ -270,9 +296,15 @@ pub(super) fn extract_page_elements(
         next_stream_index: &mut next_stream_index,
         traversal: &mut traversal,
         remaining_decoded_budget,
+        control: config.control,
+        form_scope_cache: &mut form_scope_cache,
     };
 
     for stream_id in &stream_ids {
+        runtime
+            .control
+            .checkpoint("extract_page_stream", Some(page_number))?;
+
         let stream = runtime
             .document
             .get_object(*stream_id)
@@ -306,11 +338,16 @@ fn process_stream(
     let previous_stream_index = emit.stream_index;
     emit.stream_index = stream_index;
 
+    runtime
+        .control
+        .checkpoint("process_stream_decode", Some(emit.page_number()))?;
+
     let content_bytes = decode::decode_content_stream_bounded(
         stream,
         emit.page_number,
         stream_index,
         runtime.limits.stream_byte_limit,
+        runtime.control,
     )?;
 
     if content_bytes.len() > *runtime.remaining_decoded_budget {
@@ -335,6 +372,10 @@ fn process_stream(
     })?;
 
     for (op_idx, operation) in content.operations.iter().enumerate() {
+        runtime
+            .control
+            .checkpoint("process_stream_operation", Some(emit.page_number()))?;
+
         *runtime.total_operations =
             runtime
                 .total_operations
@@ -392,21 +433,4 @@ pub(super) fn object_to_f64(value: &Object) -> Result<f64, ExtractError> {
         .map_err(|error| ExtractError::ContentDecode {
             reason: error.to_string(),
         })
-}
-
-pub(super) fn element_sort_key(element: &RawElement) -> (u32, u32, u32, u8) {
-    (
-        element.source_ref().stream_index(),
-        element.source_ref().operation_index(),
-        element.source_ref().element_index(),
-        element_kind_order(element),
-    )
-}
-
-const fn element_kind_order(element: &RawElement) -> u8 {
-    match element {
-        RawElement::Span { .. } => 0,
-        RawElement::Char { .. } => 1,
-        RawElement::Image { .. } => 2,
-    }
 }
