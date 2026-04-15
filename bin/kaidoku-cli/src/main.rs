@@ -21,5 +21,3 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-
-this_will_not_compile
