@@ -1,0 +1,33 @@
+{
+  "schema_version": "kaidoku.phase1.bench.v1",
+  "fixtures": [
+    {
+      "fixture": "doclaynet_mixed_content.pdf",
+      "bytes": 104180,
+      "iterations": 7,
+      "median_full_ms": 22.078,
+      "median_first_page_ms": 15.496,
+      "median_throughput_mib_per_s": 4.5
+    },
+    {
+      "fixture": "doclaynet_multi_column.pdf",
+      "bytes": 25846,
+      "iterations": 7,
+      "median_full_ms": 18.53,
+      "median_first_page_ms": 17.924,
+      "median_throughput_mib_per_s": 1.33
+    },
+    {
+      "fixture": "doclaynet_simple_text.pdf",
+      "bytes": 334875,
+      "iterations": 7,
+      "median_full_ms": 42.79,
+      "median_first_page_ms": 46.966,
+      "median_throughput_mib_per_s": 7.463
+    }
+  ],
+  "checks": {
+    "throughput_max_regression_ratio": 0.4,
+    "latency_max_regression_ratio": 0.4
+  }
+}

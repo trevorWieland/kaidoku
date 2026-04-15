@@ -1,71 +1,71 @@
-use serde::{Deserialize, Serialize};
+mod model;
+mod parse;
+
+pub use model::{
+    BBox, CharPayload, ElementKind, ExtractOptions, ExtractionDocument, ExtractionPage,
+    ExtractionSource, ImagePayload, PageNumber, PageRange, PageRangeError, PageSelection,
+    RawElement, RawPayload, SourceRef, SpanPayload, ValidationError, default_max_input_bytes,
+    default_max_pages,
+};
+
+use parse::extract_with_backend;
+use serde_json::Error as JsonError;
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PageRange {
-    pub start: u32,
-    pub end: u32,
+pub const SCHEMA_VERSION: &str = "kaidoku.phase1.v1";
+pub const BACKEND_ID: &str = "lopdf";
+
+#[derive(Debug, Error)]
+pub enum ExtractError {
+    #[error("input size {actual_bytes} exceeds limit {limit_bytes}")]
+    InputTooLarge {
+        limit_bytes: usize,
+        actual_bytes: usize,
+    },
+    #[error("requested page range {start}-{end} is outside document with {total_pages} pages")]
+    PageRangeOutOfBounds {
+        start: u32,
+        end: u32,
+        total_pages: u32,
+    },
+    #[error("requested page {page} is outside document with {total_pages} pages")]
+    PageOutOfBounds { page: u32, total_pages: u32 },
+    #[error("document page count {actual_pages} exceeds configured limit {limit_pages}")]
+    PageLimitExceeded { limit_pages: u32, actual_pages: u32 },
+    #[error("page selection cannot be empty")]
+    EmptySelection,
+    #[error("invalid page range: {0}")]
+    InvalidPageRange(#[from] PageRangeError),
+    #[error("validation error: {0}")]
+    Validation(#[from] ValidationError),
+    #[error("pdf parse failed: {reason}")]
+    PdfParse { reason: String },
+    #[error("content decode failed: {reason}")]
+    ContentDecode { reason: String },
+    #[error("invariant violated: {reason}")]
+    InvariantViolation { reason: String },
+    #[error("json serialization failed: {0}")]
+    JsonSerialization(#[from] JsonError),
 }
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum PageRangeError {
-    #[error("start page must be >= 1")]
-    StartPageOutOfRange,
-    #[error("end page must be >= start page")]
-    EndBeforeStart,
+pub fn extract_pdf(
+    input_bytes: &[u8],
+    options: ExtractOptions,
+) -> Result<ExtractionDocument, ExtractError> {
+    if input_bytes.len() > options.max_input_bytes {
+        return Err(ExtractError::InputTooLarge {
+            limit_bytes: options.max_input_bytes,
+            actual_bytes: input_bytes.len(),
+        });
+    }
+    extract_with_backend(input_bytes, options)
 }
 
-impl PageRange {
-    pub fn new(start: u32, end: u32) -> Result<Self, PageRangeError> {
-        if start == 0 {
-            return Err(PageRangeError::StartPageOutOfRange);
-        }
-        if end < start {
-            return Err(PageRangeError::EndBeforeStart);
-        }
-        Ok(Self { start, end })
-    }
-
-    pub const fn len(self) -> u32 {
-        self.end - self.start + 1
-    }
-
-    pub const fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-
-    pub const fn contains(self, page: u32) -> bool {
-        page >= self.start && page <= self.end
-    }
+pub fn to_canonical_json(document: &ExtractionDocument) -> Result<String, ExtractError> {
+    let mut json = serde_json::to_string_pretty(document)?;
+    json.push('\n');
+    Ok(json)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{PageRange, PageRangeError};
-
-    #[test]
-    fn new_rejects_zero_start() {
-        let range = PageRange::new(0, 1);
-        assert_eq!(range, Err(PageRangeError::StartPageOutOfRange));
-    }
-
-    #[test]
-    fn new_rejects_end_before_start() {
-        let range = PageRange::new(3, 2);
-        assert_eq!(range, Err(PageRangeError::EndBeforeStart));
-    }
-
-    #[test]
-    fn len_and_contains_work_for_valid_range() {
-        let range_result = PageRange::new(2, 5);
-        assert!(range_result.is_ok());
-
-        let Ok(range) = range_result else { return };
-
-        assert_eq!(range.len(), 4);
-        assert!(range.contains(2));
-        assert!(range.contains(5));
-        assert!(!range.contains(1));
-        assert!(!range.contains(6));
-    }
-}
+mod phase1_tests;

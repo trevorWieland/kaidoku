@@ -5,6 +5,7 @@ max_lines := "500"
 toml_globs := "Cargo.toml bin/*/Cargo.toml crates/*/Cargo.toml .cargo/*.toml .config/*.toml rust-toolchain.toml clippy.toml taplo.toml deny.toml rustfmt.toml lefthook.yml"
 foundation_crates := "kaidoku-core"
 capability_crates := "kaidoku-cli kaidoku-server kaidoku-python"
+phase1_fixtures := "tests/corpus/phase1/doclaynet_simple_text.pdf tests/corpus/phase1/doclaynet_multi_column.pdf tests/corpus/phase1/doclaynet_mixed_content.pdf"
 
 # Default recipe: show available commands
 
@@ -122,6 +123,16 @@ check:
 test *args:
     @{{ cargo }} nextest run --workspace --profile ci --no-tests=pass {{ args }}
 
+phase1-bench:
+    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --fixtures tests/corpus/phase1 --output tests/golden/phase1/benchmarks.current.json
+
+phase1-gate:
+    @{{ cargo }} nextest run -p kaidoku-core --profile ci --no-tests=pass
+    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --check --fixtures tests/corpus/phase1 --baseline tests/golden/phase1/benchmarks.baseline.json --output target/phase1/benchmarks.current.json
+
+phase1-demo:
+    @{{ cargo }} run -p kaidoku-cli -- extract --input tests/corpus/phase1/doclaynet_simple_text.pdf --input tests/corpus/phase1/doclaynet_multi_column.pdf --input tests/corpus/phase1/doclaynet_mixed_content.pdf --output target/phase1/demo
+
 coverage:
     @{{ cargo }} llvm-cov nextest -p kaidoku-core --profile ci --lcov --output-path lcov.info --fail-under-lines 80 --no-tests=pass
 
@@ -212,5 +223,5 @@ check-deps:
         exit 1
     fi
 
-ci: fmt lint check test coverage deny machete doc check-lines check-suppression check-deps
+ci: fmt lint check test phase1-gate coverage deny machete doc check-lines check-suppression check-deps
     @echo "==> All CI checks passed!"

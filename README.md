@@ -17,3 +17,27 @@ Run all checks locally with:
 ```bash
 just ci
 ```
+
+## Phase 1 Demo
+
+Run the canonical extraction demo over the committed Phase 1 fixture corpus:
+
+```bash
+cargo run -p kaidoku-cli -- extract \
+  --input tests/corpus/phase1/doclaynet_simple_text.pdf \
+  --input tests/corpus/phase1/doclaynet_multi_column.pdf \
+  --input tests/corpus/phase1/doclaynet_mixed_content.pdf \
+  --output target/phase1/demo
+```
+
+Generate baseline benchmark output:
+
+```bash
+just phase1-bench
+```
+
+Run the full Phase 1 parser gate locally:
+
+```bash
+just phase1-gate
+```

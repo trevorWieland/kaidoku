@@ -14,3 +14,6 @@ workspace = true
 anyhow = { workspace = true }
 clap = { workspace = true }
 kaidoku-core = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

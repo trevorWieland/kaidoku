@@ -1,0 +1,42 @@
+{
+  "dataset": "DocLayNet",
+  "dataset_license": "CDLA-Permissive-1.0",
+  "dataset_version": "1.0.0",
+  "fixtures": [
+    {
+      "doc_category": "financial_reports",
+      "hash": "d001142e5213c7a70a9dfed8c2f628ee3c2aff24a7f84bbdb37ef6e816a5663e",
+      "name": "doclaynet_simple_text.pdf",
+      "profile": "simple-text",
+      "selection_basis": "No table/picture/formula annotations; predominantly text blocks.",
+      "sha256": "3ecbf8727c8dd56f4a3b158ce693b5a07268937f9795c96f1f3ce7f4fde1e175",
+      "size_bytes": 334875,
+      "source_zip_path": "PDF/d001142e5213c7a70a9dfed8c2f628ee3c2aff24a7f84bbdb37ef6e816a5663e.pdf",
+      "split": "val"
+    },
+    {
+      "doc_category": "financial_reports",
+      "hash": "959c50658a9babcb3a6af8664fec40582030ac666141e7e21f2cb27fba977ae5",
+      "name": "doclaynet_multi_column.pdf",
+      "profile": "multi-column",
+      "selection_basis": "Text annotations distributed across left/right page regions (multi-column heuristic).",
+      "sha256": "8be91227c053c77686a023917f03297d0292d4fd7bdaf91830d083fff666ca8b",
+      "size_bytes": 25846,
+      "source_zip_path": "PDF/959c50658a9babcb3a6af8664fec40582030ac666141e7e21f2cb27fba977ae5.pdf",
+      "split": "val"
+    },
+    {
+      "doc_category": "financial_reports",
+      "hash": "19fb12fea8765914fd4bc8d86c921d64da953bba0f29a6ef10f789ccb97a2d1d",
+      "name": "doclaynet_mixed_content.pdf",
+      "profile": "mixed-content",
+      "selection_basis": "Contains picture and caption annotations alongside textual regions.",
+      "sha256": "d306c82e77068c95537b29b95e7df69518e8649fdad1bdc3f2f248cbb133ead1",
+      "size_bytes": 104180,
+      "source_zip_path": "PDF/19fb12fea8765914fd4bc8d86c921d64da953bba0f29a6ef10f789ccb97a2d1d.pdf",
+      "split": "val"
+    }
+  ],
+  "retrieved_on": "2026-04-15",
+  "source_zip_url": "https://codait-cos-dax.s3.us.cloud-object-storage.appdomain.cloud/dax-doclaynet/1.0.0/DocLayNet_extra.zip"
+}
