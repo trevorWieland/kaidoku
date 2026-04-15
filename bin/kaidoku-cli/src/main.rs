@@ -43,9 +43,9 @@ enum BenchSubcommands {
 
 #[derive(Debug, Args)]
 struct Phase1BenchCommand {
-    #[arg(long, default_value_t = 7)]
+    #[arg(long, default_value_t = 15)]
     iterations: u32,
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 4)]
     warmup_iterations: u32,
     #[arg(long, default_value = "tests/corpus/phase1")]
     fixtures: PathBuf,

@@ -1,4 +1,4 @@
-use crate::{ExtractError, ExtractOptions, RawPayload, extract_pdf, to_canonical_json};
+use crate::{ExtractError, ExtractOptions, ParseBackend, extract_pdf, to_canonical_json};
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -242,10 +242,12 @@ fn decoded_text_avoids_control_character_gibberish() {
 
         for page in document.pages {
             for element in page.elements {
-                let text = match element.payload() {
-                    RawPayload::Span(span) => span.text.as_str(),
-                    RawPayload::Char(character) => character.text.as_str(),
-                    RawPayload::Image(_) => continue,
+                let text = if let Some(span) = element.span_payload() {
+                    span.text.as_str()
+                } else if let Some(character) = element.char_payload() {
+                    character.text.as_str()
+                } else {
+                    continue;
                 };
 
                 let has_bad_controls = text.chars().any(|character| {
@@ -278,6 +280,20 @@ fn input_size_limit_rejects_oversized_payloads() {
             actual_bytes: 2,
         }
     ));
+}
+
+#[test]
+fn explicit_lopdf_backend_selection_is_supported() {
+    let fixture_path = corpus_dir().join("doclaynet_simple_text.pdf");
+    let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+    let options = ExtractOptions {
+        backend: ParseBackend::Lopdf,
+        ..ExtractOptions::default()
+    };
+
+    let document =
+        extract_pdf(&bytes, options).expect("explicit backend extraction should succeed");
+    assert!(!document.pages.is_empty());
 }
 
 fn required_fixture_set() -> BTreeSet<String> {

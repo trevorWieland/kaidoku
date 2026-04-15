@@ -2,18 +2,19 @@ mod model;
 mod parse;
 
 pub use model::{
-    BBox, CharPayload, ElementKind, ExtractOptions, ExtractionDocument, ExtractionPage,
-    ExtractionSource, ImagePayload, PageNumber, PageRange, PageRangeError, PageSelection,
-    RawElement, RawPayload, SourceRef, SpanPayload, ValidationError,
-    default_max_content_stream_bytes, default_max_elements_per_page, default_max_input_bytes,
-    default_max_operations_per_page, default_max_pages,
+    BBox, CharPayload, ExtractOptions, ExtractionDocument, ExtractionPage, ExtractionSource,
+    ImagePayload, PageNumber, PageRange, PageRangeError, PageSelection, ParseBackend, RawElement,
+    SourceRef, SpanPayload, ValidationError, default_max_content_stream_bytes,
+    default_max_elements_per_page, default_max_form_xobject_depth, default_max_form_xobject_visits,
+    default_max_input_bytes, default_max_operations_per_page, default_max_page_tree_depth,
+    default_max_pages, default_max_total_decoded_stream_bytes,
 };
 
 use parse::extract_with_backend;
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
-pub const SCHEMA_VERSION: &str = "kaidoku.phase1.v1";
+pub const SCHEMA_VERSION: &str = "kaidoku.phase1.v2";
 pub const BACKEND_ID: &str = "lopdf";
 
 #[derive(Debug, Error)]
@@ -44,6 +45,23 @@ pub enum ExtractError {
     #[error("content decode failed: {reason}")]
     ContentDecode { reason: String },
     #[error(
+        "decoded content stream on page {page_number} stream {stream_index} exceeds byte cap {limit_bytes} with {actual_bytes} bytes"
+    )]
+    ContentStreamDecodeLimitExceeded {
+        page_number: u32,
+        stream_index: u32,
+        limit_bytes: usize,
+        actual_bytes: usize,
+    },
+    #[error(
+        "decoded content-stream budget exceeded on page {page_number}: {actual_bytes} > {limit_bytes}"
+    )]
+    DecodedStreamBudgetExceeded {
+        page_number: u32,
+        limit_bytes: usize,
+        actual_bytes: usize,
+    },
+    #[error(
         "malformed page geometry on page {page_number} (object {page_object_number}:{page_object_generation}): {reason}"
     )]
     MalformedPageGeometry {
@@ -59,6 +77,44 @@ pub enum ExtractError {
         limit: u64,
         actual: u64,
     },
+    #[error(
+        "page-tree cycle detected while resolving geometry on page {page_number} at object {object_number}:{object_generation}"
+    )]
+    PageTreeCycleDetected {
+        page_number: u32,
+        object_number: u32,
+        object_generation: u16,
+    },
+    #[error(
+        "page-tree traversal depth exceeded while resolving geometry on page {page_number}: {depth} > {limit}"
+    )]
+    PageTreeDepthExceeded {
+        page_number: u32,
+        depth: usize,
+        limit: usize,
+    },
+    #[error("form xobject recursion depth exceeded on page {page_number}: {depth} > {limit}")]
+    FormXObjectDepthExceeded {
+        page_number: u32,
+        depth: usize,
+        limit: usize,
+    },
+    #[error(
+        "form xobject cycle detected on page {page_number} at object {object_number}:{object_generation}"
+    )]
+    FormXObjectCycleDetected {
+        page_number: u32,
+        object_number: u32,
+        object_generation: u16,
+    },
+    #[error("form xobject visit limit exceeded on page {page_number}: {actual} > {limit}")]
+    FormXObjectVisitLimitExceeded {
+        page_number: u32,
+        limit: usize,
+        actual: usize,
+    },
+    #[error("invalid fallback geometry for page {page_number}: {reason}")]
+    InvalidFallbackGeometry { page_number: u32, reason: String },
     #[error("invariant violated: {reason}")]
     InvariantViolation { reason: String },
     #[error("json serialization failed: {0}")]

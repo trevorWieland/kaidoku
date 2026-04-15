@@ -124,11 +124,14 @@ test *args:
     @{{ cargo }} nextest run --workspace --profile ci --no-tests=pass {{ args }}
 
 phase1-bench:
-    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --fixtures tests/corpus/phase1 --output tests/golden/phase1/benchmarks.current.json
+    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --fixtures tests/corpus/phase1 --output tests/golden/phase1/benchmarks.current.json
+
+phase1-bench-refresh:
+    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --fixtures tests/corpus/phase1 --output tests/golden/phase1/benchmarks.baseline.json
 
 phase1-gate:
     @{{ cargo }} nextest run -p kaidoku-core --profile ci --no-tests=pass
-    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --check --fixtures tests/corpus/phase1 --baseline tests/golden/phase1/benchmarks.baseline.json --output target/phase1/benchmarks.current.json
+    @{{ cargo }} run -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --check --fixtures tests/corpus/phase1 --baseline tests/golden/phase1/benchmarks.baseline.json --output target/phase1/benchmarks.current.json
 
 phase1-demo:
     @{{ cargo }} run -p kaidoku-cli -- extract --input tests/corpus/phase1/doclaynet_simple_text.pdf --input tests/corpus/phase1/doclaynet_multi_column.pdf --input tests/corpus/phase1/doclaynet_mixed_content.pdf --output target/phase1/demo
@@ -223,5 +226,5 @@ check-deps:
         exit 1
     fi
 
-ci: fmt lint check test phase1-gate coverage deny machete doc check-lines check-suppression check-deps
+ci: fmt lint check phase1-gate test coverage deny machete doc check-lines check-suppression check-deps
     @echo "==> All CI checks passed!"

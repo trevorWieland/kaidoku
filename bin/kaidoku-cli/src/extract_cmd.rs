@@ -3,7 +3,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use kaidoku_core::{ExtractOptions, PageRange, PageSelection, extract_pdf, to_canonical_json};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -64,75 +63,40 @@ fn extract_one(input_path: &Path, output_path: &Path, page_selection: PageSelect
 }
 
 fn plan_output_paths(inputs: &[PathBuf], output_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
-    let mut planned = Vec::with_capacity(inputs.len());
-    let mut by_output: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
-
+    let mut groups: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for input in inputs {
-        let output = extraction_output_path(input, output_dir)?;
-        by_output
-            .entry(output.clone())
-            .or_default()
-            .push(input.clone());
-        planned.push((input.clone(), output));
+        let stem = extraction_output_stem(input)?;
+        groups.entry(stem).or_default().push(input.clone());
     }
 
-    let duplicates = by_output
-        .into_iter()
-        .filter(|(_, mapped_inputs)| mapped_inputs.len() > 1)
-        .collect::<Vec<_>>();
+    let mut planned = Vec::with_capacity(inputs.len());
+    for (stem, mut grouped_inputs) in groups {
+        grouped_inputs.sort_by_key(|path| stable_input_hint(path));
 
-    if !duplicates.is_empty() {
-        let details = duplicates
-            .iter()
-            .map(|(output, inputs_for_output)| {
-                format!(
-                    "{} <- {}",
-                    output.display(),
-                    inputs_for_output
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        bail!("duplicate output paths detected before extraction: {details}");
+        if grouped_inputs.len() == 1 {
+            let input = grouped_inputs.pop().expect("single input in group");
+            planned.push((input, output_dir.join(format!("{stem}.json"))));
+            continue;
+        }
+
+        for (index, input) in grouped_inputs.into_iter().enumerate() {
+            let suffix = u32::try_from(index)
+                .map_err(|_| anyhow!("duplicate index overflow for output stem {stem}"))?
+                .saturating_add(1);
+            planned.push((input, output_dir.join(format!("{stem}_{suffix:02}.json"))));
+        }
     }
 
+    planned.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(planned)
 }
 
-fn extraction_output_path(input_path: &Path, output_dir: &Path) -> Result<PathBuf> {
+fn extraction_output_stem(input_path: &Path) -> Result<String> {
     let stem = input_path
         .file_stem()
         .and_then(OsStr::to_str)
         .ok_or_else(|| anyhow!("invalid input filename: {}", input_path.display()))?;
-
-    let parent_hint = input_path
-        .parent()
-        .and_then(|parent| parent.file_name())
-        .and_then(OsStr::to_str)
-        .unwrap_or("root");
-
-    let canonical = input_path
-        .canonicalize()
-        .unwrap_or_else(|_| input_path.to_path_buf());
-    let fingerprint = short_path_hash(&canonical);
-
-    let label = format!(
-        "{}_{}",
-        sanitize_component(parent_hint),
-        sanitize_component(stem),
-    );
-    Ok(output_dir.join(format!("{label}_{fingerprint}.json")))
-}
-
-fn short_path_hash(path: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(path.to_string_lossy().as_bytes());
-    let digest = format!("{:x}", hasher.finalize());
-    digest.chars().take(12).collect()
+    Ok(sanitize_component(stem))
 }
 
 fn sanitize_component(input: &str) -> String {
@@ -152,6 +116,23 @@ fn sanitize_component(input: &str) -> String {
     } else {
         sanitized
     }
+}
+
+fn stable_input_hint(input_path: &Path) -> String {
+    let parent = input_path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(OsStr::to_str)
+        .unwrap_or("root");
+    let file_name = input_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("unnamed");
+    format!(
+        "{}:{}",
+        sanitize_component(parent),
+        sanitize_component(file_name)
+    )
 }
 
 fn parse_pages_spec(spec: Option<&str>) -> Result<PageSelection> {
@@ -211,7 +192,7 @@ fn parse_pages_spec(spec: Option<&str>) -> Result<PageSelection> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PageSelection, extraction_output_path, parse_pages_spec, plan_output_paths};
+    use super::{PageSelection, extraction_output_stem, parse_pages_spec, plan_output_paths};
     use std::path::Path;
 
     #[test]
@@ -242,18 +223,16 @@ mod tests {
     }
 
     #[test]
-    fn output_names_include_path_identity() {
-        let output_a =
-            extraction_output_path(Path::new("/tmp/alpha/input.pdf"), Path::new("/tmp/out"));
-        let output_b =
-            extraction_output_path(Path::new("/tmp/beta/input.pdf"), Path::new("/tmp/out"));
+    fn output_stems_are_stable_across_clone_paths() {
+        let output_a = extraction_output_stem(Path::new("/tmp/alpha/input.pdf"));
+        let output_b = extraction_output_stem(Path::new("/different/root/input.pdf"));
 
         assert!(output_a.is_ok());
         assert!(output_b.is_ok());
         let (Ok(output_a), Ok(output_b)) = (output_a, output_b) else {
             return;
         };
-        assert_ne!(output_a, output_b);
+        assert_eq!(output_a, output_b);
     }
 
     #[test]

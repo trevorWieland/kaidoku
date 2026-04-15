@@ -23,6 +23,7 @@ Parser-adapter policy:
 - Any change under `crates/kaidoku-core/src/parse/` must run and pass `just phase1-gate`.
 - Parser-adapter PRs are expected to include updated goldens/bench baseline when behavior changes.
 - The Phase 1 fixture corpus is pinned; removing or renaming required fixtures is gate-breaking.
+- Extraction schema is currently `kaidoku.phase1.v2` and intentionally breaking from v1.
 
 ## Phase 1 Demo
 
@@ -40,6 +41,12 @@ Generate baseline benchmark output:
 
 ```bash
 just phase1-bench
+```
+
+Refresh the committed benchmark baseline after approved parser/benchmark methodology changes:
+
+```bash
+just phase1-bench-refresh
 ```
 
 Run the full Phase 1 parser gate locally:

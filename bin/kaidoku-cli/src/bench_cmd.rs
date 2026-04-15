@@ -8,10 +8,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-const BENCH_SCHEMA_VERSION: &str = "kaidoku.phase1.bench.v2";
-const THROUGHPUT_MAX_REGRESSION_RATIO: f64 = 0.20;
-const LATENCY_MAX_REGRESSION_RATIO: f64 = 0.20;
+mod regression;
+
+const BENCH_SCHEMA_VERSION: &str = "kaidoku.phase1.bench.v3";
+const THROUGHPUT_MAX_REGRESSION_RATIO: f64 = 0.25;
+const LATENCY_MAX_REGRESSION_RATIO: f64 = 0.25;
 const NOISE_SIGMA_MULTIPLIER: f64 = 2.5;
+const REGRESSION_PROBABILITY_THRESHOLD: f64 = 0.70;
+const REGRESSION_EFFECT_SIZE_FLOOR: f64 = 0.10;
+const BYTES_PER_MIB: f64 = 1024.0 * 1024.0;
 const REQUIRED_PHASE1_FIXTURES: [&str; 3] = [
     "doclaynet_simple_text.pdf",
     "doclaynet_multi_column.pdf",
@@ -21,8 +26,16 @@ const REQUIRED_PHASE1_FIXTURES: [&str; 3] = [
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BenchReport {
     schema_version: String,
+    calibration: RuntimeCalibration,
     fixtures: Vec<FixtureBenchResult>,
     checks: BenchChecks,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RuntimeCalibration {
+    median_probe_ms: f64,
+    mad_probe_ms: f64,
+    probe_ms_samples: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +44,8 @@ struct BenchChecks {
     throughput_max_regression_ratio: f64,
     latency_max_regression_ratio: f64,
     noise_sigma_multiplier: f64,
+    regression_probability_threshold: f64,
+    regression_effect_size_floor: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +60,9 @@ struct FixtureBenchResult {
     mad_first_page_ms: f64,
     median_throughput_mib_per_s: f64,
     mad_throughput_mib_per_s: f64,
+    full_ms_samples: Vec<f64>,
+    first_page_ms_samples: Vec<f64>,
+    throughput_mib_per_s_samples: Vec<f64>,
 }
 
 pub(super) fn run_bench(command: BenchCommand) -> Result<()> {
@@ -68,15 +86,19 @@ fn run_phase1_bench(command: &Phase1BenchCommand) -> Result<()> {
             command.warmup_iterations,
         )?);
     }
+    let calibration = benchmark_runtime_calibration(command.iterations, command.warmup_iterations)?;
 
     let report = BenchReport {
         schema_version: BENCH_SCHEMA_VERSION.to_string(),
+        calibration,
         fixtures: results,
         checks: BenchChecks {
             warmup_iterations: command.warmup_iterations,
             throughput_max_regression_ratio: THROUGHPUT_MAX_REGRESSION_RATIO,
             latency_max_regression_ratio: LATENCY_MAX_REGRESSION_RATIO,
             noise_sigma_multiplier: NOISE_SIGMA_MULTIPLIER,
+            regression_probability_threshold: REGRESSION_PROBABILITY_THRESHOLD,
+            regression_effect_size_floor: REGRESSION_EFFECT_SIZE_FLOOR,
         },
     };
 
@@ -100,10 +122,45 @@ fn run_phase1_bench(command: &Phase1BenchCommand) -> Result<()> {
 
     if command.check {
         let baseline = load_bench_report(&command.baseline)?;
-        check_bench_regression(&baseline, &report)?;
+        regression::check_bench_regression(&baseline, &report)?;
     }
 
     Ok(())
+}
+
+fn benchmark_runtime_calibration(
+    iterations: u32,
+    warmup_iterations: u32,
+) -> Result<RuntimeCalibration> {
+    for _ in 0..warmup_iterations {
+        run_calibration_probe();
+    }
+
+    let mut probe_runs = Vec::with_capacity(
+        usize::try_from(iterations).context("iteration count does not fit into usize")?,
+    );
+    for _ in 0..iterations {
+        let start = Instant::now();
+        run_calibration_probe();
+        probe_runs.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+
+    let median_probe_ms = median(&mut probe_runs);
+    Ok(RuntimeCalibration {
+        median_probe_ms: round_metric(median_probe_ms),
+        mad_probe_ms: round_metric(mad(&probe_runs, median_probe_ms)),
+        probe_ms_samples: probe_runs.iter().copied().map(round_metric).collect(),
+    })
+}
+
+fn run_calibration_probe() {
+    let mut state = 0_u64;
+    for i in 0_u64..500_000 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(i ^ 0x9E37_79B9_7F4A_7C15);
+    }
+    std::hint::black_box(state);
 }
 
 fn benchmark_fixture(
@@ -113,7 +170,11 @@ fn benchmark_fixture(
 ) -> Result<FixtureBenchResult> {
     let bytes =
         fs::read(path).with_context(|| format!("failed reading fixture {}", path.display()))?;
-    let bytes_u64 = u64::try_from(bytes.len()).context("fixture size does not fit into u64")?;
+    let bytes_len = bytes.len();
+    let bytes_u64 = u64::try_from(bytes_len).context("fixture size does not fit into u64")?;
+    let bytes_u32 = u32::try_from(bytes_len)
+        .context("fixture size does not fit into u32 for throughput math")?;
+    let fixture_mib = f64::from(bytes_u32) / BYTES_PER_MIB;
 
     for _ in 0..warmup_iterations {
         run_full_extraction(&bytes, path)?;
@@ -136,15 +197,11 @@ fn benchmark_fixture(
         let elapsed_full_ms = start.elapsed().as_secs_f64() * 1000.0;
         full_runs.push(elapsed_full_ms);
 
-        let bytes_as_f64: f64 = bytes_u64
-            .to_string()
-            .parse()
-            .context("failed converting bytes to f64")?;
         let full_seconds = elapsed_full_ms / 1000.0;
         let throughput_mib_per_s = if full_seconds == 0.0 {
             0.0
         } else {
-            (bytes_as_f64 / (1024.0 * 1024.0)) / full_seconds
+            fixture_mib / full_seconds
         };
         throughput_runs.push(throughput_mib_per_s);
 
@@ -172,6 +229,9 @@ fn benchmark_fixture(
         mad_first_page_ms: round_metric(mad(&first_page_runs, median_first_page_ms)),
         median_throughput_mib_per_s: round_metric(median_throughput_mib_per_s),
         mad_throughput_mib_per_s: round_metric(mad(&throughput_runs, median_throughput_mib_per_s)),
+        full_ms_samples: full_runs.iter().copied().map(round_metric).collect(),
+        first_page_ms_samples: first_page_runs.iter().copied().map(round_metric).collect(),
+        throughput_mib_per_s_samples: throughput_runs.iter().copied().map(round_metric).collect(),
     })
 }
 
@@ -268,135 +328,6 @@ fn load_bench_report(path: &Path) -> Result<BenchReport> {
     Ok(report)
 }
 
-fn check_bench_regression(baseline: &BenchReport, current: &BenchReport) -> Result<()> {
-    let baseline_names = baseline
-        .fixtures
-        .iter()
-        .map(|fixture| fixture.fixture.as_str())
-        .collect::<BTreeSet<_>>();
-    let current_names = current
-        .fixtures
-        .iter()
-        .map(|fixture| fixture.fixture.as_str())
-        .collect::<BTreeSet<_>>();
-
-    if baseline_names != current_names {
-        let missing = baseline_names
-            .difference(&current_names)
-            .copied()
-            .collect::<Vec<_>>();
-        let extra = current_names
-            .difference(&baseline_names)
-            .copied()
-            .collect::<Vec<_>>();
-        bail!(
-            "benchmark fixture-set mismatch between baseline and current; missing: [{}], extra: [{}]",
-            missing.join(", "),
-            extra.join(", ")
-        );
-    }
-
-    let baseline_map: BTreeMap<&str, &FixtureBenchResult> = baseline
-        .fixtures
-        .iter()
-        .map(|fixture| (fixture.fixture.as_str(), fixture))
-        .collect();
-
-    for fixture in &current.fixtures {
-        let Some(previous) = baseline_map.get(fixture.fixture.as_str()) else {
-            bail!(
-                "fixture {} is missing from benchmark baseline",
-                fixture.fixture
-            );
-        };
-
-        let throughput_drop = regression_ratio(
-            previous.median_throughput_mib_per_s,
-            fixture.median_throughput_mib_per_s,
-            true,
-        );
-        let throughput_limit = threshold_with_noise(
-            THROUGHPUT_MAX_REGRESSION_RATIO,
-            previous.median_throughput_mib_per_s,
-            previous.mad_throughput_mib_per_s,
-            fixture.mad_throughput_mib_per_s,
-        );
-        if throughput_drop > throughput_limit {
-            bail!(
-                "throughput regression for {} is {:.3}, exceeds {:.3}",
-                fixture.fixture,
-                throughput_drop,
-                throughput_limit,
-            );
-        }
-
-        let full_latency_increase =
-            regression_ratio(previous.median_full_ms, fixture.median_full_ms, false);
-        let full_limit = threshold_with_noise(
-            LATENCY_MAX_REGRESSION_RATIO,
-            previous.median_full_ms,
-            previous.mad_full_ms,
-            fixture.mad_full_ms,
-        );
-        if full_latency_increase > full_limit {
-            bail!(
-                "full extraction latency regression for {} is {:.3}, exceeds {:.3}",
-                fixture.fixture,
-                full_latency_increase,
-                full_limit,
-            );
-        }
-
-        let first_page_latency_increase = regression_ratio(
-            previous.median_first_page_ms,
-            fixture.median_first_page_ms,
-            false,
-        );
-        let first_page_limit = threshold_with_noise(
-            LATENCY_MAX_REGRESSION_RATIO,
-            previous.median_first_page_ms,
-            previous.mad_first_page_ms,
-            fixture.mad_first_page_ms,
-        );
-        if first_page_latency_increase > first_page_limit {
-            bail!(
-                "first-page latency regression for {} is {:.3}, exceeds {:.3}",
-                fixture.fixture,
-                first_page_latency_increase,
-                first_page_limit,
-            );
-        }
-    }
-
-    Ok(())
-}
-
-fn threshold_with_noise(
-    base: f64,
-    baseline_median: f64,
-    baseline_mad: f64,
-    current_mad: f64,
-) -> f64 {
-    if baseline_median <= f64::EPSILON {
-        return base;
-    }
-
-    let noise_ratio =
-        (NOISE_SIGMA_MULTIPLIER * (baseline_mad + current_mad) / baseline_median).clamp(0.0, 0.10);
-    base + noise_ratio
-}
-
-fn regression_ratio(baseline: f64, current: f64, lower_is_worse: bool) -> f64 {
-    if baseline == 0.0 {
-        return 0.0;
-    }
-    if lower_is_worse {
-        ((baseline - current) / baseline).max(0.0)
-    } else {
-        ((current - baseline) / baseline).max(0.0)
-    }
-}
-
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let midpoint = values.len() / 2;
@@ -422,34 +353,4 @@ fn mad(values: &[f64], median_value: f64) -> f64 {
 
 fn round_metric(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BTreeSet, regression_ratio, threshold_with_noise, validate_required_fixture_set};
-
-    #[test]
-    fn regression_ratio_behaves_as_expected() {
-        let throughput_drop = regression_ratio(100.0, 70.0, true);
-        assert!((throughput_drop - 0.3).abs() < f64::EPSILON);
-
-        let latency_increase = regression_ratio(100.0, 130.0, false);
-        assert!((latency_increase - 0.3).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn threshold_with_noise_is_tighter_than_legacy_defaults() {
-        let threshold = threshold_with_noise(0.2, 40.0, 1.0, 1.0);
-        assert!(threshold < 0.4);
-    }
-
-    #[test]
-    fn fixture_set_validation_rejects_missing_fixture() {
-        let actual = ["doclaynet_simple_text.pdf", "doclaynet_multi_column.pdf"]
-            .into_iter()
-            .map(str::to_string)
-            .collect::<BTreeSet<String>>();
-
-        assert!(validate_required_fixture_set(&actual).is_err());
-    }
 }

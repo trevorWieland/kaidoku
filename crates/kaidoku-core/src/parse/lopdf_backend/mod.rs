@@ -1,19 +1,19 @@
 mod emit;
 mod resources;
 
-use super::ParseBackend;
+use super::ParserBackend;
 use crate::{
     BACKEND_ID, ExtractError, ExtractOptions, ExtractionDocument, ExtractionPage, ExtractionSource,
     PageNumber, SCHEMA_VERSION,
 };
-use emit::ExtractionLimits;
+use emit::{ExtractionLimits, PageEmitConfig};
 use lopdf::{Document, ObjectId};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LopdfBackend;
 
-impl ParseBackend for LopdfBackend {
+impl ParserBackend for LopdfBackend {
     fn extract(
         &self,
         input_bytes: &[u8],
@@ -39,11 +39,18 @@ impl ParseBackend for LopdfBackend {
         let selection = options.page_selection.clone().validate(total_pages)?;
 
         let mut extracted_pages = Vec::new();
+        let mut remaining_decoded_budget = options.max_total_decoded_stream_bytes;
         for (page_number, page_id) in pages {
             if !selection.includes(page_number) {
                 continue;
             }
-            extracted_pages.push(extract_page(&document, page_number, page_id, &options)?);
+            extracted_pages.push(extract_page(
+                &document,
+                page_number,
+                page_id,
+                &options,
+                &mut remaining_decoded_budget,
+            )?);
         }
 
         if extracted_pages.is_empty() {
@@ -69,30 +76,39 @@ fn extract_page(
     page_number: u32,
     page_id: ObjectId,
     options: &ExtractOptions,
+    remaining_decoded_budget: &mut usize,
 ) -> Result<ExtractionPage, ExtractError> {
     let page_number = PageNumber::new(page_number)?;
-    let (page_width, page_height) = resources::page_dimensions(document, page_number, page_id)?;
-    let image_catalog = resources::build_image_catalog(document, page_id)?;
+    let page_geometry =
+        resources::page_geometry(document, page_number, page_id, options.max_page_tree_depth)?;
+    let page_scope = resources::page_resource_scope(document, page_id)?;
 
     let mut elements = emit::extract_page_elements(
         document,
         page_number,
         page_id,
-        options.coordinate_precision,
-        &image_catalog,
-        ExtractionLimits {
-            operation_budget: options.max_operations_per_page,
-            max_elements: options.max_elements_per_page,
-            stream_byte_limit: options.max_content_stream_bytes,
+        PageEmitConfig {
+            coordinate_precision: options.coordinate_precision,
+            page_geometry,
+            root_scope: &page_scope,
+            limits: ExtractionLimits {
+                operation_budget: options.max_operations_per_page,
+                max_elements: options.max_elements_per_page,
+                stream_byte_limit: options.max_content_stream_bytes,
+                total_stream_budget: options.max_total_decoded_stream_bytes,
+                max_form_depth: options.max_form_xobject_depth,
+                max_form_visits: options.max_form_xobject_visits,
+            },
         },
+        remaining_decoded_budget,
     )?;
 
     elements.sort_by_key(emit::element_sort_key);
 
     Ok(ExtractionPage {
         page_number,
-        width: page_width,
-        height: page_height,
+        width: page_geometry.width,
+        height: page_geometry.height,
         elements,
     })
 }

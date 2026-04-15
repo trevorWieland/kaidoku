@@ -1,19 +1,20 @@
+mod decode;
 mod fonts;
 mod matrix;
+mod ops;
 mod state;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_limits;
 mod text;
 
-use super::resources::ImageMetadata;
-use crate::{
-    BBox, ElementKind, ExtractError, ImagePayload, PageNumber, RawElement, RawPayload, SourceRef,
-};
+use super::resources::{self, PageGeometry, ResourceScope};
+use crate::{BBox, ExtractError, ImagePayload, PageNumber, RawElement, SourceRef};
 use fonts::FontCatalog;
-use lopdf::{Document, Object, ObjectId, content::Content, content::Operation};
-use matrix::Matrix;
+use lopdf::{Document, Object, ObjectId, Stream, content::Content};
 use state::{GraphicsState, TextState};
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OperationCursor {
@@ -38,7 +39,7 @@ pub(super) struct EmitContext<'a> {
     page_id: ObjectId,
     stream_index: u32,
     coordinate_precision: u8,
-    image_catalog: &'a HashMap<Vec<u8>, ImageMetadata>,
+    page_geometry: PageGeometry,
     font_catalog: &'a FontCatalog<'a>,
     max_elements_per_page: u32,
     out: &'a mut Vec<RawElement>,
@@ -49,9 +50,88 @@ pub(super) struct ExtractionLimits {
     pub(super) operation_budget: u32,
     pub(super) max_elements: u32,
     pub(super) stream_byte_limit: usize,
+    pub(super) total_stream_budget: usize,
+    pub(super) max_form_depth: usize,
+    pub(super) max_form_visits: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct PageEmitConfig<'a> {
+    pub(super) coordinate_precision: u8,
+    pub(super) page_geometry: PageGeometry,
+    pub(super) root_scope: &'a ResourceScope,
+    pub(super) limits: ExtractionLimits,
+}
+
+#[derive(Debug)]
+struct FormTraversal {
+    page_number: PageNumber,
+    max_depth: usize,
+    max_visits: usize,
+    stack: Vec<ObjectId>,
+    visited: HashSet<ObjectId>,
+}
+
+struct ProcessRuntime<'a> {
+    document: &'a Document,
+    limits: ExtractionLimits,
+    total_operations: &'a mut u32,
+    next_stream_index: &'a mut u32,
+    traversal: &'a mut FormTraversal,
+    remaining_decoded_budget: &'a mut usize,
+}
+
+impl FormTraversal {
+    fn new(page_number: PageNumber, max_depth: usize, max_visits: usize) -> Self {
+        Self {
+            page_number,
+            max_depth,
+            max_visits,
+            stack: Vec::new(),
+            visited: HashSet::new(),
+        }
+    }
+
+    fn enter(&mut self, object_id: ObjectId) -> Result<(), ExtractError> {
+        if self.stack.len() >= self.max_depth {
+            return Err(ExtractError::FormXObjectDepthExceeded {
+                page_number: self.page_number.get(),
+                depth: self.stack.len().saturating_add(1),
+                limit: self.max_depth,
+            });
+        }
+
+        if self.stack.contains(&object_id) {
+            return Err(ExtractError::FormXObjectCycleDetected {
+                page_number: self.page_number.get(),
+                object_number: object_id.0,
+                object_generation: object_id.1,
+            });
+        }
+
+        self.visited.insert(object_id);
+        if self.visited.len() > self.max_visits {
+            return Err(ExtractError::FormXObjectVisitLimitExceeded {
+                page_number: self.page_number.get(),
+                limit: self.max_visits,
+                actual: self.visited.len(),
+            });
+        }
+
+        self.stack.push(object_id);
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        let _ = self.stack.pop();
+    }
 }
 
 impl EmitContext<'_> {
+    pub(super) const fn page_number(&self) -> PageNumber {
+        self.page_number
+    }
+
     fn source_ref(
         &self,
         operation_index: u32,
@@ -68,13 +148,12 @@ impl EmitContext<'_> {
         .map_err(ExtractError::from)
     }
 
-    pub(super) fn push_element(
+    fn push_element(
         &mut self,
         operation_index: u32,
         element_index: u32,
-        kind: ElementKind,
         bbox: BBox,
-        payload: RawPayload,
+        build: impl FnOnce(BBox, SourceRef) -> RawElement,
     ) -> Result<(), ExtractError> {
         let next_count = self
             .out
@@ -98,9 +177,56 @@ impl EmitContext<'_> {
         }
 
         let source_ref = self.source_ref(operation_index, element_index)?;
-        self.out
-            .push(RawElement::new(kind, bbox, payload, source_ref));
+        let normalized_bbox =
+            self.page_geometry
+                .normalize_bbox(bbox, self.coordinate_precision, self.page_number)?;
+        self.out.push(build(normalized_bbox, source_ref));
         Ok(())
+    }
+
+    pub(super) fn push_char(
+        &mut self,
+        operation_index: u32,
+        element_index: u32,
+        bbox: BBox,
+        payload: crate::CharPayload,
+    ) -> Result<(), ExtractError> {
+        self.push_element(
+            operation_index,
+            element_index,
+            bbox,
+            |normalized_bbox, source_ref| RawElement::char(normalized_bbox, source_ref, payload),
+        )
+    }
+
+    pub(super) fn push_span(
+        &mut self,
+        operation_index: u32,
+        element_index: u32,
+        bbox: BBox,
+        payload: crate::SpanPayload,
+    ) -> Result<(), ExtractError> {
+        self.push_element(
+            operation_index,
+            element_index,
+            bbox,
+            |normalized_bbox, source_ref| RawElement::span(normalized_bbox, source_ref, payload),
+        )
+    }
+
+    fn push_image(
+        &mut self,
+        operation_index: u32,
+        element_index: u32,
+        bbox: BBox,
+        payload: ImagePayload,
+    ) -> Result<(), ExtractError> {
+        self.push_element(
+            operation_index,
+            element_index,
+            bbox,
+            |normalized_bbox, source_ref| RawElement::image(normalized_bbox, source_ref, payload),
+        )
     }
 }
 
@@ -108,338 +234,155 @@ pub(super) fn extract_page_elements(
     document: &Document,
     page_number: PageNumber,
     page_id: ObjectId,
-    coordinate_precision: u8,
-    image_catalog: &HashMap<Vec<u8>, ImageMetadata>,
-    limits: ExtractionLimits,
+    config: PageEmitConfig<'_>,
+    remaining_decoded_budget: &mut usize,
 ) -> Result<Vec<RawElement>, ExtractError> {
     let mut elements = Vec::new();
     let font_catalog = FontCatalog::from_page(document, page_id)?;
-    let mut text_state = TextState::default();
-    let mut graphics_state = GraphicsState::default();
+
+    let mut emit = EmitContext {
+        page_number,
+        page_id,
+        stream_index: 0,
+        coordinate_precision: config.coordinate_precision,
+        page_geometry: config.page_geometry,
+        font_catalog: &font_catalog,
+        max_elements_per_page: config.limits.max_elements,
+        out: &mut elements,
+    };
 
     let stream_ids = document.get_page_contents(page_id);
     let mut total_operations: u32 = 0;
+    let mut next_stream_index: u32 = 0;
+    let mut traversal = FormTraversal::new(
+        page_number,
+        config.limits.max_form_depth,
+        config.limits.max_form_visits,
+    );
 
-    for (stream_idx, stream_id) in stream_ids.iter().enumerate() {
-        let stream = document
+    let mut page_text_state = TextState::default();
+    let mut page_graphics_state = GraphicsState::default();
+
+    let mut runtime = ProcessRuntime {
+        document,
+        limits: config.limits,
+        total_operations: &mut total_operations,
+        next_stream_index: &mut next_stream_index,
+        traversal: &mut traversal,
+        remaining_decoded_budget,
+    };
+
+    for stream_id in &stream_ids {
+        let stream = runtime
+            .document
             .get_object(*stream_id)
             .and_then(Object::as_stream)
             .map_err(|error| ExtractError::ContentDecode {
                 reason: error.to_string(),
             })?;
 
-        let content_bytes = match stream.decompressed_content() {
-            Ok(content) => content,
-            Err(_) => stream.content.clone(),
-        };
-
-        if content_bytes.len() > limits.stream_byte_limit {
-            return Err(ExtractError::ExtractionLimitExceeded {
-                page_number: page_number.get(),
-                kind: "content_stream_bytes",
-                limit: u64::try_from(limits.stream_byte_limit).map_err(|_| {
-                    ExtractError::InvariantViolation {
-                        reason: "content stream byte limit does not fit in u64".to_string(),
-                    }
-                })?,
-                actual: u64::try_from(content_bytes.len()).map_err(|_| {
-                    ExtractError::InvariantViolation {
-                        reason: "content stream byte count does not fit in u64".to_string(),
-                    }
-                })?,
-            });
-        }
-
-        let content =
-            Content::decode(&content_bytes).map_err(|error| ExtractError::ContentDecode {
-                reason: error.to_string(),
-            })?;
-
-        let stream_index =
-            u32::try_from(stream_idx).map_err(|_| ExtractError::InvariantViolation {
-                reason: "stream index overflow".to_string(),
-            })?;
-
-        let mut emit = EmitContext {
-            page_number,
-            page_id,
-            stream_index,
-            coordinate_precision,
-            image_catalog,
-            font_catalog: &font_catalog,
-            max_elements_per_page: limits.max_elements,
-            out: &mut elements,
-        };
-
-        for (op_idx, operation) in content.operations.iter().enumerate() {
-            total_operations =
-                total_operations
-                    .checked_add(1)
-                    .ok_or(ExtractError::InvariantViolation {
-                        reason: "operation count overflow".to_string(),
-                    })?;
-
-            if total_operations > limits.operation_budget {
-                return Err(ExtractError::ExtractionLimitExceeded {
-                    page_number: page_number.get(),
-                    kind: "operations_per_page",
-                    limit: u64::from(limits.operation_budget),
-                    actual: u64::from(total_operations),
-                });
-            }
-
-            let operation_index =
-                u32::try_from(op_idx).map_err(|_| ExtractError::InvariantViolation {
-                    reason: "operation index overflow".to_string(),
-                })?;
-
-            let mut cursor = OperationCursor { next_index: 0 };
-            process_operation(
-                operation,
-                operation_index,
-                &mut text_state,
-                &mut graphics_state,
-                &mut cursor,
-                &mut emit,
-            )?;
-        }
+        process_stream(
+            stream,
+            config.root_scope,
+            &mut page_text_state,
+            &mut page_graphics_state,
+            &mut emit,
+            &mut runtime,
+        )?;
     }
 
     Ok(elements)
 }
 
-fn process_operation(
-    operation: &Operation,
-    operation_index: u32,
+fn process_stream(
+    stream: &Stream,
+    scope: &ResourceScope,
     text_state: &mut TextState,
     graphics_state: &mut GraphicsState,
-    cursor: &mut OperationCursor,
-    context: &mut EmitContext<'_>,
+    emit: &mut EmitContext<'_>,
+    runtime: &mut ProcessRuntime<'_>,
 ) -> Result<(), ExtractError> {
-    if handle_text_state_operation(operation, text_state)? {
-        return Ok(());
-    }
+    let stream_index = allocate_stream_index(runtime.next_stream_index)?;
+    let previous_stream_index = emit.stream_index;
+    emit.stream_index = stream_index;
 
-    if handle_text_show_operation(
-        operation,
-        operation_index,
-        text_state,
-        graphics_state,
-        cursor,
-        context,
-    )? {
-        return Ok(());
-    }
+    let content_bytes = decode::decode_content_stream_bounded(
+        stream,
+        emit.page_number,
+        stream_index,
+        runtime.limits.stream_byte_limit,
+    )?;
 
-    match operation.operator.as_str() {
-        "cm" => {
-            let matrix = Matrix::from_operands(&operation.operands)?;
-            graphics_state.concatenate_ctm(matrix);
+    if content_bytes.len() > *runtime.remaining_decoded_budget {
+        let consumed_before = runtime
+            .limits
+            .total_stream_budget
+            .saturating_sub(*runtime.remaining_decoded_budget);
+        let actual_bytes = consumed_before.saturating_add(content_bytes.len());
+        emit.stream_index = previous_stream_index;
+        return Err(ExtractError::DecodedStreamBudgetExceeded {
+            page_number: emit.page_number.get(),
+            limit_bytes: runtime.limits.total_stream_budget,
+            actual_bytes,
+        });
+    }
+    *runtime.remaining_decoded_budget = runtime
+        .remaining_decoded_budget
+        .saturating_sub(content_bytes.len());
+
+    let content = Content::decode(&content_bytes).map_err(|error| ExtractError::ContentDecode {
+        reason: error.to_string(),
+    })?;
+
+    for (op_idx, operation) in content.operations.iter().enumerate() {
+        *runtime.total_operations =
+            runtime
+                .total_operations
+                .checked_add(1)
+                .ok_or(ExtractError::InvariantViolation {
+                    reason: "operation count overflow".to_string(),
+                })?;
+
+        if *runtime.total_operations > runtime.limits.operation_budget {
+            emit.stream_index = previous_stream_index;
+            return Err(ExtractError::ExtractionLimitExceeded {
+                page_number: emit.page_number.get(),
+                kind: "operations_per_page",
+                limit: u64::from(runtime.limits.operation_budget),
+                actual: u64::from(*runtime.total_operations),
+            });
         }
-        "q" => graphics_state.save(),
-        "Q" => graphics_state.restore(),
-        "Do" => {
-            if let Some(first) = operation.operands.first() {
-                maybe_emit_image_element(
-                    first,
-                    graphics_state.ctm(),
-                    operation_index,
-                    cursor,
-                    context,
-                )?;
-            }
-        }
-        _ => {}
+
+        let operation_index =
+            u32::try_from(op_idx).map_err(|_| ExtractError::InvariantViolation {
+                reason: "operation index overflow".to_string(),
+            })?;
+
+        let mut cursor = OperationCursor { next_index: 0 };
+        ops::process_operation(
+            operation,
+            operation_index,
+            text_state,
+            graphics_state,
+            &mut cursor,
+            emit,
+            (scope, runtime),
+        )?;
     }
 
+    emit.stream_index = previous_stream_index;
     Ok(())
 }
 
-fn handle_text_state_operation(
-    operation: &Operation,
-    text_state: &mut TextState,
-) -> Result<bool, ExtractError> {
-    match operation.operator.as_str() {
-        "BT" => text_state.begin_text_object(),
-        "Tf" => update_text_font(operation, text_state)?,
-        "Tc" => {
-            if let Some(first) = operation.operands.first() {
-                text_state.set_char_spacing(object_to_f64(first)?);
-            }
-        }
-        "Tw" => {
-            if let Some(first) = operation.operands.first() {
-                text_state.set_word_spacing(object_to_f64(first)?);
-            }
-        }
-        "Tz" => {
-            if let Some(first) = operation.operands.first() {
-                text_state.set_horizontal_scaling(object_to_f64(first)?);
-            }
-        }
-        "TL" => {
-            if let Some(first) = operation.operands.first() {
-                text_state.set_leading(object_to_f64(first)?);
-            }
-        }
-        "Ts" => {
-            if let Some(first) = operation.operands.first() {
-                text_state.set_text_rise(object_to_f64(first)?);
-            }
-        }
-        "Td" | "TD" => update_text_position(operation, text_state)?,
-        "Tm" => update_text_matrix(operation, text_state)?,
-        "T*" => text_state.next_line(),
-        _ => return Ok(false),
-    }
-
-    Ok(true)
-}
-
-fn handle_text_show_operation(
-    operation: &Operation,
-    operation_index: u32,
-    text_state: &mut TextState,
-    graphics_state: &GraphicsState,
-    cursor: &mut OperationCursor,
-    context: &mut EmitContext<'_>,
-) -> Result<bool, ExtractError> {
-    match operation.operator.as_str() {
-        "'" => {
-            text_state.next_line();
-            if let Some(first) = operation.operands.first() {
-                text::emit_text_elements(
-                    first,
-                    text_state,
-                    graphics_state,
-                    operation_index,
-                    cursor,
-                    context,
-                )?;
-            }
-        }
-        "\"" => {
-            if operation.operands.len() >= 2 {
-                text_state.set_word_spacing(object_to_f64(&operation.operands[0])?);
-                text_state.set_char_spacing(object_to_f64(&operation.operands[1])?);
-            }
-            text_state.next_line();
-            if let Some(last) = operation.operands.last() {
-                text::emit_text_elements(
-                    last,
-                    text_state,
-                    graphics_state,
-                    operation_index,
-                    cursor,
-                    context,
-                )?;
-            }
-        }
-        "Tj" => {
-            if let Some(first) = operation.operands.first() {
-                text::emit_text_elements(
-                    first,
-                    text_state,
-                    graphics_state,
-                    operation_index,
-                    cursor,
-                    context,
-                )?;
-            }
-        }
-        "TJ" => {
-            if let Some(first) = operation.operands.first() {
-                text::emit_text_array(
-                    first,
-                    text_state,
-                    graphics_state,
-                    operation_index,
-                    cursor,
-                    context,
-                )?;
-            }
-        }
-        _ => return Ok(false),
-    }
-
-    Ok(true)
-}
-
-fn update_text_font(operation: &Operation, text_state: &mut TextState) -> Result<(), ExtractError> {
-    if operation.operands.len() >= 2 {
-        let key = operation.operands[0].as_name().ok().map(<[u8]>::to_vec);
-        let font_size = object_to_f64(&operation.operands[1])?.abs();
-        text_state.set_font(key, font_size);
-    }
-    Ok(())
-}
-
-fn update_text_position(
-    operation: &Operation,
-    text_state: &mut TextState,
-) -> Result<(), ExtractError> {
-    if operation.operands.len() >= 2 {
-        let tx = object_to_f64(&operation.operands[0])?;
-        let ty = object_to_f64(&operation.operands[1])?;
-        text_state.move_text_position(tx, ty, operation.operator == "TD");
-    }
-    Ok(())
-}
-
-fn update_text_matrix(
-    operation: &Operation,
-    text_state: &mut TextState,
-) -> Result<(), ExtractError> {
-    if operation.operands.len() == 6 {
-        let matrix = Matrix::from_operands(&operation.operands)?;
-        text_state.set_text_matrix(matrix);
-    }
-    Ok(())
-}
-
-fn maybe_emit_image_element(
-    name_object: &Object,
-    ctm: Matrix,
-    operation_index: u32,
-    cursor: &mut OperationCursor,
-    context: &mut EmitContext<'_>,
-) -> Result<(), ExtractError> {
-    let name = name_object
-        .as_name()
-        .map_err(|error| ExtractError::ContentDecode {
-            reason: error.to_string(),
-        })?;
-
-    let Some(metadata) = context.image_catalog.get(name) else {
-        return Ok(());
-    };
-
-    let (x, y, width, height) = if let Some(bbox) = ctm.to_bbox() {
-        bbox
-    } else {
-        (
-            0.0,
-            0.0,
-            f64::from(metadata.width_px),
-            f64::from(metadata.height_px),
-        )
-    };
-
-    let bbox = BBox::new(x, y, width, height)?.quantized(context.coordinate_precision);
-    let element_index = cursor.next_element_index()?;
-    context.push_element(
-        operation_index,
-        element_index,
-        ElementKind::Image,
-        bbox,
-        RawPayload::Image(ImagePayload {
-            name: metadata.name.clone(),
-            width_px: metadata.width_px,
-            height_px: metadata.height_px,
-            color_space: metadata.color_space.clone(),
-            bits_per_component: metadata.bits_per_component,
-        }),
-    )
+fn allocate_stream_index(next_stream_index: &mut u32) -> Result<u32, ExtractError> {
+    let current = *next_stream_index;
+    *next_stream_index =
+        next_stream_index
+            .checked_add(1)
+            .ok_or(ExtractError::InvariantViolation {
+                reason: "stream index overflow".to_string(),
+            })?;
+    Ok(current)
 }
 
 pub(super) fn object_to_f64(value: &Object) -> Result<f64, ExtractError> {
@@ -456,14 +399,14 @@ pub(super) fn element_sort_key(element: &RawElement) -> (u32, u32, u32, u8) {
         element.source_ref().stream_index(),
         element.source_ref().operation_index(),
         element.source_ref().element_index(),
-        element_kind_order(element.kind()),
+        element_kind_order(element),
     )
 }
 
-const fn element_kind_order(kind: ElementKind) -> u8 {
-    match kind {
-        ElementKind::Span => 0,
-        ElementKind::Char => 1,
-        ElementKind::Image => 2,
+const fn element_kind_order(element: &RawElement) -> u8 {
+    match element {
+        RawElement::Span { .. } => 0,
+        RawElement::Char { .. } => 1,
+        RawElement::Image { .. } => 2,
     }
 }

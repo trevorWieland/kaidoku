@@ -1,6 +1,6 @@
 use super::state::{GraphicsState, TextState};
 use super::{EmitContext, OperationCursor};
-use crate::{BBox, CharPayload, ElementKind, ExtractError, RawPayload, SpanPayload};
+use crate::{BBox, CharPayload, ExtractError, SpanPayload};
 use lopdf::Object;
 
 pub(super) fn emit_text_array(
@@ -104,8 +104,7 @@ pub(super) fn emit_text_elements(
                 glyph_advance.max(1e-6),
                 text_state.font_size(),
             )?
-        }
-        .quantized(context.coordinate_precision);
+        };
 
         span_bbox = Some(match span_bbox {
             None => char_bbox,
@@ -125,36 +124,33 @@ pub(super) fn emit_text_elements(
         text_state.advance_text(total_advance);
     }
 
-    let span_bbox = span_bbox.unwrap_or_else(|| {
+    let span_bbox = if let Some(span_bbox) = span_bbox {
+        span_bbox
+    } else {
         let origin = text_state.current_origin(graphics_state.ctm());
-        BBox::new(origin.0, origin.1, 1e-6, text_state.font_size()).unwrap_or_else(|_| {
-            BBox::new(0.0, 0.0, 1e-6, text_state.font_size())
-                .expect("constant bbox should be valid")
-        })
-    });
+        BBox::new(origin.0, origin.1, 1e-6, text_state.font_size()).map_err(|error| {
+            ExtractError::InvalidFallbackGeometry {
+                page_number: context.page_number().get(),
+                reason: format!("failed constructing span fallback bbox: {error}"),
+            }
+        })?
+    };
 
     let span_element_index = cursor.next_element_index()?;
-    context.push_element(
+    context.push_span(
         operation_index,
         span_element_index,
-        ElementKind::Span,
         span_bbox,
-        RawPayload::Span(SpanPayload {
+        SpanPayload {
             text: decoded_text,
             font_name: font_name.clone(),
             font_size: text_state.font_size(),
-        }),
+        },
     )?;
 
     for (bbox, payload) in pending_chars {
         let char_element_index = cursor.next_element_index()?;
-        context.push_element(
-            operation_index,
-            char_element_index,
-            ElementKind::Char,
-            bbox,
-            RawPayload::Char(payload),
-        )?;
+        context.push_char(operation_index, char_element_index, bbox, payload)?;
     }
 
     Ok(())

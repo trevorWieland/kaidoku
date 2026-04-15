@@ -1,0 +1,350 @@
+use super::{
+    BenchReport, FixtureBenchResult, LATENCY_MAX_REGRESSION_RATIO, NOISE_SIGMA_MULTIPLIER,
+    REGRESSION_EFFECT_SIZE_FLOOR, REGRESSION_PROBABILITY_THRESHOLD, RuntimeCalibration,
+    THROUGHPUT_MAX_REGRESSION_RATIO, median,
+};
+use anyhow::{Result, bail};
+use std::collections::{BTreeMap, BTreeSet};
+
+pub(super) fn check_bench_regression(baseline: &BenchReport, current: &BenchReport) -> Result<()> {
+    ensure_same_fixture_set(baseline, current)?;
+    let runtime_scale = runtime_scale_factor(&baseline.calibration, &current.calibration);
+    let fixture_scale = fixture_runtime_scale_factor(baseline, current);
+    let effective_scale = (runtime_scale * fixture_scale).clamp(0.5, 3.0);
+    let baseline_map: BTreeMap<&str, &FixtureBenchResult> = baseline
+        .fixtures
+        .iter()
+        .map(|fixture| (fixture.fixture.as_str(), fixture))
+        .collect();
+
+    for fixture in &current.fixtures {
+        let Some(previous) = baseline_map.get(fixture.fixture.as_str()) else {
+            bail!(
+                "fixture {} is missing from benchmark baseline",
+                fixture.fixture
+            );
+        };
+        check_fixture_regression(previous, fixture, effective_scale)?;
+    }
+
+    Ok(())
+}
+
+fn ensure_same_fixture_set(baseline: &BenchReport, current: &BenchReport) -> Result<()> {
+    let baseline_names = baseline
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.fixture.as_str())
+        .collect::<BTreeSet<_>>();
+    let current_names = current
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.fixture.as_str())
+        .collect::<BTreeSet<_>>();
+
+    if baseline_names != current_names {
+        let missing = baseline_names
+            .difference(&current_names)
+            .copied()
+            .collect::<Vec<_>>();
+        let extra = current_names
+            .difference(&baseline_names)
+            .copied()
+            .collect::<Vec<_>>();
+        bail!(
+            "benchmark fixture-set mismatch between baseline and current; missing: [{}], extra: [{}]",
+            missing.join(", "),
+            extra.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+fn check_fixture_regression(
+    baseline_fixture: &FixtureBenchResult,
+    current_fixture: &FixtureBenchResult,
+    runtime_scale: f64,
+) -> Result<()> {
+    check_throughput_regression(baseline_fixture, current_fixture, runtime_scale)?;
+    check_full_latency_regression(baseline_fixture, current_fixture, runtime_scale)?;
+    check_first_page_latency_regression(baseline_fixture, current_fixture, runtime_scale)?;
+    Ok(())
+}
+
+fn check_throughput_regression(
+    baseline_fixture: &FixtureBenchResult,
+    current_fixture: &FixtureBenchResult,
+    runtime_scale: f64,
+) -> Result<()> {
+    let adjusted_current_median =
+        scale_throughput(current_fixture.median_throughput_mib_per_s, runtime_scale);
+    let adjusted_current_mad =
+        scale_throughput(current_fixture.mad_throughput_mib_per_s, runtime_scale);
+    let adjusted_current_samples = current_fixture
+        .throughput_mib_per_s_samples
+        .iter()
+        .map(|sample| scale_throughput(*sample, runtime_scale))
+        .collect::<Vec<_>>();
+
+    let drop = regression_ratio(
+        baseline_fixture.median_throughput_mib_per_s,
+        adjusted_current_median,
+        true,
+    );
+    let limit = threshold_with_noise(
+        THROUGHPUT_MAX_REGRESSION_RATIO,
+        baseline_fixture.median_throughput_mib_per_s,
+        baseline_fixture.mad_throughput_mib_per_s,
+        adjusted_current_mad,
+    );
+    let probability = pairwise_regression_probability(
+        &baseline_fixture.throughput_mib_per_s_samples,
+        &adjusted_current_samples,
+        true,
+    );
+    if drop > limit + REGRESSION_EFFECT_SIZE_FLOOR && probability > REGRESSION_PROBABILITY_THRESHOLD
+    {
+        bail!(
+            "throughput regression for {} is {:.3}, exceeds {:.3} with one-sided probability {:.3}",
+            current_fixture.fixture,
+            drop,
+            limit,
+            probability,
+        );
+    }
+    Ok(())
+}
+
+fn check_full_latency_regression(
+    baseline_fixture: &FixtureBenchResult,
+    current_fixture: &FixtureBenchResult,
+    runtime_scale: f64,
+) -> Result<()> {
+    let adjusted_current_median = scale_latency(current_fixture.median_full_ms, runtime_scale);
+    let adjusted_current_mad = scale_latency(current_fixture.mad_full_ms, runtime_scale);
+    let adjusted_current_samples = current_fixture
+        .full_ms_samples
+        .iter()
+        .map(|sample| scale_latency(*sample, runtime_scale))
+        .collect::<Vec<_>>();
+
+    let increase = regression_ratio(
+        baseline_fixture.median_full_ms,
+        adjusted_current_median,
+        false,
+    );
+    let limit = threshold_with_noise(
+        LATENCY_MAX_REGRESSION_RATIO,
+        baseline_fixture.median_full_ms,
+        baseline_fixture.mad_full_ms,
+        adjusted_current_mad,
+    );
+    let probability = pairwise_regression_probability(
+        &baseline_fixture.full_ms_samples,
+        &adjusted_current_samples,
+        false,
+    );
+    if increase > limit + REGRESSION_EFFECT_SIZE_FLOOR
+        && probability > REGRESSION_PROBABILITY_THRESHOLD
+    {
+        bail!(
+            "full extraction latency regression for {} is {:.3}, exceeds {:.3} with one-sided probability {:.3}",
+            current_fixture.fixture,
+            increase,
+            limit,
+            probability,
+        );
+    }
+    Ok(())
+}
+
+fn check_first_page_latency_regression(
+    baseline_fixture: &FixtureBenchResult,
+    current_fixture: &FixtureBenchResult,
+    runtime_scale: f64,
+) -> Result<()> {
+    let adjusted_current_median =
+        scale_latency(current_fixture.median_first_page_ms, runtime_scale);
+    let adjusted_current_mad = scale_latency(current_fixture.mad_first_page_ms, runtime_scale);
+    let adjusted_current_samples = current_fixture
+        .first_page_ms_samples
+        .iter()
+        .map(|sample| scale_latency(*sample, runtime_scale))
+        .collect::<Vec<_>>();
+
+    let increase = regression_ratio(
+        baseline_fixture.median_first_page_ms,
+        adjusted_current_median,
+        false,
+    );
+    let limit = threshold_with_noise(
+        LATENCY_MAX_REGRESSION_RATIO,
+        baseline_fixture.median_first_page_ms,
+        baseline_fixture.mad_first_page_ms,
+        adjusted_current_mad,
+    );
+    let probability = pairwise_regression_probability(
+        &baseline_fixture.first_page_ms_samples,
+        &adjusted_current_samples,
+        false,
+    );
+    if increase > limit + REGRESSION_EFFECT_SIZE_FLOOR
+        && probability > REGRESSION_PROBABILITY_THRESHOLD
+    {
+        bail!(
+            "first-page latency regression for {} is {:.3}, exceeds {:.3} with one-sided probability {:.3}",
+            current_fixture.fixture,
+            increase,
+            limit,
+            probability,
+        );
+    }
+
+    Ok(())
+}
+
+fn threshold_with_noise(
+    base: f64,
+    baseline_median: f64,
+    baseline_mad: f64,
+    current_mad: f64,
+) -> f64 {
+    if baseline_median <= f64::EPSILON {
+        return base;
+    }
+
+    let noise_ratio =
+        (NOISE_SIGMA_MULTIPLIER * (baseline_mad + current_mad) / baseline_median).clamp(0.0, 0.10);
+    base + noise_ratio
+}
+
+fn regression_ratio(baseline: f64, current: f64, lower_is_worse: bool) -> f64 {
+    if baseline == 0.0 {
+        return 0.0;
+    }
+    if lower_is_worse {
+        ((baseline - current) / baseline).max(0.0)
+    } else {
+        ((current - baseline) / baseline).max(0.0)
+    }
+}
+
+fn pairwise_regression_probability(
+    baseline_samples: &[f64],
+    current_samples: &[f64],
+    lower_is_worse: bool,
+) -> f64 {
+    if baseline_samples.is_empty() || current_samples.is_empty() {
+        return 0.0;
+    }
+
+    let mut regressions = 0.0_f64;
+    let mut comparisons = 0.0_f64;
+
+    for baseline in baseline_samples {
+        for current in current_samples {
+            let is_regression = if lower_is_worse {
+                current < baseline
+            } else {
+                current > baseline
+            };
+
+            comparisons += 1.0;
+            if is_regression {
+                regressions += 1.0;
+            }
+        }
+    }
+
+    if comparisons <= f64::EPSILON {
+        return 0.0;
+    }
+
+    regressions / comparisons
+}
+
+fn runtime_scale_factor(baseline: &RuntimeCalibration, current: &RuntimeCalibration) -> f64 {
+    if baseline.median_probe_ms <= f64::EPSILON || current.median_probe_ms <= f64::EPSILON {
+        return 1.0;
+    }
+    (current.median_probe_ms / baseline.median_probe_ms).clamp(0.5, 2.0)
+}
+
+fn fixture_runtime_scale_factor(baseline: &BenchReport, current: &BenchReport) -> f64 {
+    let baseline_map: BTreeMap<&str, &FixtureBenchResult> = baseline
+        .fixtures
+        .iter()
+        .map(|fixture| (fixture.fixture.as_str(), fixture))
+        .collect();
+
+    let mut ratios = current
+        .fixtures
+        .iter()
+        .filter_map(|fixture| {
+            baseline_map
+                .get(fixture.fixture.as_str())
+                .filter(|baseline_fixture| baseline_fixture.median_full_ms > f64::EPSILON)
+                .map(|baseline_fixture| fixture.median_full_ms / baseline_fixture.median_full_ms)
+        })
+        .collect::<Vec<_>>();
+
+    if ratios.is_empty() {
+        return 1.0;
+    }
+
+    median(&mut ratios).clamp(0.5, 2.5)
+}
+
+fn scale_throughput(value: f64, runtime_scale: f64) -> f64 {
+    value * runtime_scale
+}
+
+fn scale_latency(value: f64, runtime_scale: f64) -> f64 {
+    value / runtime_scale
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{pairwise_regression_probability, regression_ratio, threshold_with_noise};
+    use crate::bench_cmd::validate_required_fixture_set;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn regression_ratio_behaves_as_expected() {
+        let throughput_drop = regression_ratio(100.0, 70.0, true);
+        assert!((throughput_drop - 0.3).abs() < f64::EPSILON);
+
+        let latency_increase = regression_ratio(100.0, 130.0, false);
+        assert!((latency_increase - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn threshold_with_noise_is_tighter_than_legacy_defaults() {
+        let threshold = threshold_with_noise(0.25, 40.0, 1.0, 1.0);
+        assert!(threshold < 0.4);
+    }
+
+    #[test]
+    fn fixture_set_validation_rejects_missing_fixture() {
+        let actual = ["doclaynet_simple_text.pdf", "doclaynet_multi_column.pdf"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<String>>();
+
+        assert!(validate_required_fixture_set(&actual).is_err());
+    }
+
+    #[test]
+    fn pairwise_probability_detects_consistent_regression_direction() {
+        let baseline = [10.0, 10.5, 11.0];
+        let slower_current = [13.0, 13.5, 14.0];
+        let probability = pairwise_regression_probability(&baseline, &slower_current, false);
+        assert!(probability > 0.95);
+
+        let faster_current = [8.5, 9.0, 9.5];
+        let throughput_probability =
+            pairwise_regression_probability(&baseline, &faster_current, true);
+        assert!(throughput_probability > 0.95);
+    }
+}

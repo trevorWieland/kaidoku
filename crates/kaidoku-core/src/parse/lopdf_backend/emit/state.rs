@@ -148,6 +148,14 @@ impl Default for GraphicsState {
 }
 
 impl GraphicsState {
+    #[must_use]
+    pub(super) fn with_ctm(ctm: Matrix) -> Self {
+        Self {
+            ctm,
+            stack: Vec::new(),
+        }
+    }
+
     pub(super) fn concatenate_ctm(&mut self, matrix: Matrix) {
         self.ctm = self.ctm.concatenate(matrix);
     }

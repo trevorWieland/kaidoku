@@ -103,14 +103,6 @@ impl BBox {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ElementKind {
-    Char,
-    Span,
-    Image,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CharPayload {
     pub text: String,
@@ -133,14 +125,6 @@ pub struct ImagePayload {
     pub height_px: u32,
     pub color_space: Option<String>,
     pub bits_per_component: Option<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "payload_type", rename_all = "snake_case")]
-pub enum RawPayload {
-    Char(CharPayload),
-    Span(SpanPayload),
-    Image(ImagePayload),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -243,42 +227,91 @@ impl SourceRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RawElement {
-    kind: ElementKind,
-    bbox: BBox,
-    payload: RawPayload,
-    source_ref: SourceRef,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RawElement {
+    Char {
+        bbox: BBox,
+        source_ref: SourceRef,
+        payload: CharPayload,
+    },
+    Span {
+        bbox: BBox,
+        source_ref: SourceRef,
+        payload: SpanPayload,
+    },
+    Image {
+        bbox: BBox,
+        source_ref: SourceRef,
+        payload: ImagePayload,
+    },
 }
 
 impl RawElement {
     #[must_use]
-    pub fn new(kind: ElementKind, bbox: BBox, payload: RawPayload, source_ref: SourceRef) -> Self {
-        Self {
-            kind,
+    pub const fn char(bbox: BBox, source_ref: SourceRef, payload: CharPayload) -> Self {
+        Self::Char {
             bbox,
-            payload,
             source_ref,
+            payload,
         }
     }
 
     #[must_use]
-    pub const fn kind(&self) -> ElementKind {
-        self.kind
+    pub const fn span(bbox: BBox, source_ref: SourceRef, payload: SpanPayload) -> Self {
+        Self::Span {
+            bbox,
+            source_ref,
+            payload,
+        }
+    }
+
+    #[must_use]
+    pub const fn image(bbox: BBox, source_ref: SourceRef, payload: ImagePayload) -> Self {
+        Self::Image {
+            bbox,
+            source_ref,
+            payload,
+        }
     }
 
     #[must_use]
     pub const fn bbox(&self) -> BBox {
-        self.bbox
+        match self {
+            Self::Char { bbox, .. } | Self::Span { bbox, .. } | Self::Image { bbox, .. } => *bbox,
+        }
     }
 
     #[must_use]
     pub const fn source_ref(&self) -> SourceRef {
-        self.source_ref
+        match self {
+            Self::Char { source_ref, .. }
+            | Self::Span { source_ref, .. }
+            | Self::Image { source_ref, .. } => *source_ref,
+        }
     }
 
     #[must_use]
-    pub const fn payload(&self) -> &RawPayload {
-        &self.payload
+    pub const fn char_payload(&self) -> Option<&CharPayload> {
+        match self {
+            Self::Char { payload, .. } => Some(payload),
+            Self::Span { .. } | Self::Image { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn span_payload(&self) -> Option<&SpanPayload> {
+        match self {
+            Self::Span { payload, .. } => Some(payload),
+            Self::Char { .. } | Self::Image { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn image_payload(&self) -> Option<&ImagePayload> {
+        match self {
+            Self::Image { payload, .. } => Some(payload),
+            Self::Char { .. } | Self::Span { .. } => None,
+        }
     }
 }
 
@@ -311,7 +344,10 @@ fn quantize(value: f64, precision: u8) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{BBox, SourceRef, ValidationError};
+    use super::{
+        BBox, CharPayload, ImagePayload, RawElement, SourceRef, SpanPayload, ValidationError,
+    };
+    use serde_json::from_str;
 
     #[test]
     fn bbox_rejects_invalid_values() {
@@ -329,5 +365,114 @@ mod tests {
 
         let Ok(source_ref) = source_ref else { return };
         assert_eq!(source_ref.stable_key(), "p1-o9-s0-i3");
+    }
+
+    #[test]
+    fn page_number_and_source_ref_deserialize_paths_are_validated() {
+        let invalid_page = SourceRef::new(0, 1, 0, 0, 0, 0);
+        assert_eq!(invalid_page, Err(ValidationError::InvalidPageNumber));
+
+        let parsed = from_str::<SourceRef>(
+            r#"{
+                "page_number": 3,
+                "page_object_number": 12,
+                "page_object_generation": 0,
+                "stream_index": 2,
+                "operation_index": 7,
+                "element_index": 4
+            }"#,
+        );
+        assert!(parsed.is_ok());
+
+        let Ok(parsed) = parsed else { return };
+        assert_eq!(parsed.page_number().get(), 3);
+        assert_eq!(parsed.page_object_number(), 12);
+        assert_eq!(parsed.page_object_generation(), 0);
+        assert_eq!(parsed.stream_index(), 2);
+        assert_eq!(parsed.operation_index(), 7);
+        assert_eq!(parsed.element_index(), 4);
+
+        let invalid = from_str::<SourceRef>(
+            r#"{
+                "page_number": 0,
+                "page_object_number": 12,
+                "page_object_generation": 0,
+                "stream_index": 2,
+                "operation_index": 7,
+                "element_index": 4
+            }"#,
+        );
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn bbox_deserialize_and_quantize_cover_accessors() {
+        let parsed = from_str::<BBox>(r#"{"x":1.2349,"y":-0.0101,"width":4.4449,"height":9.9951}"#);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else { return };
+
+        let quantized = parsed.quantized(2);
+        assert!((quantized.x() - 1.23).abs() < f64::EPSILON);
+        assert!((quantized.y() + 0.01).abs() < f64::EPSILON);
+        assert!((quantized.width() - 4.44).abs() < f64::EPSILON);
+        assert!((quantized.height() - 10.0).abs() < f64::EPSILON);
+
+        let invalid = from_str::<BBox>(r#"{"x":1.0,"y":2.0,"width":-1.0,"height":2.0}"#);
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn raw_element_variant_accessors_are_type_safe() {
+        let bbox = BBox::new(0.0, 1.0, 2.0, 3.0);
+        assert!(bbox.is_ok());
+        let Ok(bbox) = bbox else { return };
+
+        let source_ref = SourceRef::new(1, 9, 0, 2, 3, 4);
+        assert!(source_ref.is_ok());
+        let Ok(source_ref) = source_ref else { return };
+
+        let char_element = RawElement::char(
+            bbox,
+            source_ref,
+            CharPayload {
+                text: "A".to_string(),
+                font_name: Some("F1".to_string()),
+                font_size: 12.0,
+                char_index: 0,
+            },
+        );
+        assert!(char_element.char_payload().is_some());
+        assert!(char_element.span_payload().is_none());
+        assert!(char_element.image_payload().is_none());
+        assert_eq!(char_element.bbox(), bbox);
+        assert_eq!(char_element.source_ref(), source_ref);
+
+        let span_element = RawElement::span(
+            bbox,
+            source_ref,
+            SpanPayload {
+                text: "AB".to_string(),
+                font_name: None,
+                font_size: 10.0,
+            },
+        );
+        assert!(span_element.char_payload().is_none());
+        assert!(span_element.span_payload().is_some());
+        assert!(span_element.image_payload().is_none());
+
+        let image_element = RawElement::image(
+            bbox,
+            source_ref,
+            ImagePayload {
+                name: "Im1".to_string(),
+                width_px: 16,
+                height_px: 8,
+                color_space: Some("DeviceRGB".to_string()),
+                bits_per_component: Some(8),
+            },
+        );
+        assert!(image_element.char_payload().is_none());
+        assert!(image_element.span_payload().is_none());
+        assert!(image_element.image_payload().is_some());
     }
 }

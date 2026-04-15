@@ -25,6 +25,29 @@ pub const fn default_max_content_stream_bytes() -> usize {
     32 * 1024 * 1024
 }
 
+pub const fn default_max_total_decoded_stream_bytes() -> usize {
+    128 * 1024 * 1024
+}
+
+pub const fn default_max_page_tree_depth() -> usize {
+    128
+}
+
+pub const fn default_max_form_xobject_depth() -> usize {
+    16
+}
+
+pub const fn default_max_form_xobject_visits() -> usize {
+    2048
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ParseBackend {
+    #[default]
+    Lopdf,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PageRange {
     start: u32,
@@ -208,6 +231,7 @@ impl PageSelection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractOptions {
+    pub backend: ParseBackend,
     pub page_selection: PageSelection,
     pub coordinate_precision: u8,
     pub max_input_bytes: usize,
@@ -215,11 +239,16 @@ pub struct ExtractOptions {
     pub max_operations_per_page: u32,
     pub max_elements_per_page: u32,
     pub max_content_stream_bytes: usize,
+    pub max_total_decoded_stream_bytes: usize,
+    pub max_page_tree_depth: usize,
+    pub max_form_xobject_depth: usize,
+    pub max_form_xobject_visits: usize,
 }
 
 impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
+            backend: ParseBackend::default(),
             page_selection: PageSelection::All,
             coordinate_precision: DEFAULT_COORDINATE_PRECISION,
             max_input_bytes: default_max_input_bytes(),
@@ -227,14 +256,22 @@ impl Default for ExtractOptions {
             max_operations_per_page: default_max_operations_per_page(),
             max_elements_per_page: default_max_elements_per_page(),
             max_content_stream_bytes: default_max_content_stream_bytes(),
+            max_total_decoded_stream_bytes: default_max_total_decoded_stream_bytes(),
+            max_page_tree_depth: default_max_page_tree_depth(),
+            max_form_xobject_depth: default_max_form_xobject_depth(),
+            max_form_xobject_visits: default_max_form_xobject_visits(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ExplicitPageSelection, PageRange, PageRangeError, PageSelection};
-    use serde_json::from_str;
+    use super::{
+        ExplicitPageSelection, ExtractOptions, PageRange, PageRangeError, PageSelection,
+        ParseBackend,
+    };
+    use crate::ExtractError;
+    use serde_json::{from_str, to_string};
 
     #[test]
     fn new_rejects_zero_start() {
@@ -289,5 +326,76 @@ mod tests {
 
         let Ok(parsed) = parsed else { return };
         assert_eq!(parsed.as_slice(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn page_range_deserialize_and_validate_errors() {
+        let parsed = from_str::<PageRange>(r#"{"start":2,"end":4}"#);
+        assert!(parsed.is_ok());
+        let Ok(parsed) = parsed else { return };
+        assert_eq!(parsed.start(), 2);
+        assert_eq!(parsed.end(), 4);
+        assert!(!parsed.is_empty());
+
+        let invalid = from_str::<PageRange>(r#"{"start":0,"end":4}"#);
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn page_selection_validate_catches_out_of_bounds_cases() {
+        let empty_doc = PageSelection::All.validate(0);
+        assert!(matches!(empty_doc, Err(ExtractError::EmptySelection)));
+
+        let range = PageRange::new(2, 4);
+        assert!(range.is_ok());
+        let Ok(range) = range else { return };
+        let range = PageSelection::Range(range);
+        let range_error = range.validate(3);
+        assert!(matches!(
+            range_error,
+            Err(ExtractError::PageRangeOutOfBounds {
+                start: 2,
+                end: 4,
+                total_pages: 3
+            })
+        ));
+    }
+
+    #[test]
+    fn explicit_selection_validate_bounds_and_accessors() {
+        let explicit = PageSelection::from_pages(vec![2, 5, 3]);
+        assert!(explicit.is_ok());
+        let Ok(explicit) = explicit else { return };
+
+        assert!(explicit.includes(3));
+        assert!(!explicit.includes(1));
+        assert_eq!(explicit.explicit_pages(), Some(&[2, 3, 5][..]));
+
+        let out_of_bounds = explicit.clone().validate(4);
+        assert!(matches!(
+            out_of_bounds,
+            Err(ExtractError::PageOutOfBounds {
+                page: 5,
+                total_pages: 4
+            })
+        ));
+
+        let in_bounds = explicit.validate(5);
+        assert!(in_bounds.is_ok());
+    }
+
+    #[test]
+    fn parse_backend_and_extract_options_defaults_are_stable() {
+        let backend_json = to_string(&ParseBackend::Lopdf);
+        assert!(matches!(backend_json, Ok(ref json) if json == "\"lopdf\""));
+
+        let defaults = ExtractOptions::default();
+        assert_eq!(defaults.backend, ParseBackend::Lopdf);
+        assert_eq!(defaults.coordinate_precision, 3);
+        assert!(defaults.max_content_stream_bytes > 0);
+        assert!(defaults.max_total_decoded_stream_bytes >= defaults.max_content_stream_bytes);
+        assert!(defaults.max_page_tree_depth > 0);
+        assert!(defaults.max_form_xobject_depth > 0);
+        assert!(defaults.max_form_xobject_visits > 0);
     }
 }
