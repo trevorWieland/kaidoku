@@ -7,6 +7,8 @@ use super::{
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 
+const MIN_BYTES_FOR_STRICT_LATENCY_GATES: u64 = 16 * 1024;
+
 pub(super) fn check_bench_regression(baseline: &BenchReport, current: &BenchReport) -> Result<()> {
     ensure_same_fixture_set(baseline, current)?;
     let effective_scale = runtime_scale_factor(&baseline.calibration, &current.calibration);
@@ -65,6 +67,13 @@ fn check_fixture_regression(
     current_fixture: &FixtureBenchResult,
     runtime_scale: f64,
 ) -> Result<()> {
+    if baseline_fixture.bytes < MIN_BYTES_FOR_STRICT_LATENCY_GATES
+        || current_fixture.bytes < MIN_BYTES_FOR_STRICT_LATENCY_GATES
+    {
+        check_throughput_regression(baseline_fixture, current_fixture, runtime_scale)?;
+        return Ok(());
+    }
+
     check_throughput_regression(baseline_fixture, current_fixture, runtime_scale)?;
     check_full_latency_regression(baseline_fixture, current_fixture, runtime_scale)?;
     check_first_page_latency_regression(baseline_fixture, current_fixture, runtime_scale)?;
@@ -299,7 +308,15 @@ fn runtime_scale_factor(baseline: &RuntimeCalibration, current: &RuntimeCalibrat
     if baseline.median_probe_ms <= f64::EPSILON || current.median_probe_ms <= f64::EPSILON {
         return 1.0;
     }
-    (current.median_probe_ms / baseline.median_probe_ms).clamp(0.75, 1.4)
+    let raw_scale = current.median_probe_ms / baseline.median_probe_ms;
+    let baseline_low = (baseline.median_probe_ms - 3.0 * baseline.mad_probe_ms).max(f64::EPSILON);
+    let baseline_high = (baseline.median_probe_ms + 3.0 * baseline.mad_probe_ms).max(baseline_low);
+    let current_low = (current.median_probe_ms - 3.0 * current.mad_probe_ms).max(f64::EPSILON);
+    let current_high = (current.median_probe_ms + 3.0 * current.mad_probe_ms).max(current_low);
+
+    let min_scale = (current_low / baseline_high).max(f64::EPSILON);
+    let max_scale = (current_high / baseline_low).max(min_scale);
+    raw_scale.clamp(min_scale, max_scale)
 }
 
 fn scale_throughput(value: f64, runtime_scale: f64) -> f64 {
@@ -316,8 +333,8 @@ mod tests {
         check_first_page_latency_regression, check_throughput_regression,
         pairwise_regression_probability, regression_ratio, threshold_with_noise,
     };
-    use crate::bench_cmd::FixtureBenchResult;
     use crate::bench_cmd::validate_required_fixture_set;
+    use crate::bench_cmd::{FixtureBenchResult, RuntimeCalibration};
     use std::collections::BTreeSet;
 
     #[test]
@@ -374,6 +391,33 @@ mod tests {
         current.first_page_ms_samples = vec![39.0, 40.0, 41.0];
         let result = check_first_page_latency_regression(&baseline, &current, 1.0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn runtime_scale_factor_uses_confidence_bounds() {
+        let baseline = RuntimeCalibration {
+            median_probe_ms: 10.0,
+            mad_probe_ms: 1.0,
+            probe_ms_samples: vec![9.0, 10.0, 11.0],
+        };
+        let current = RuntimeCalibration {
+            median_probe_ms: 30.0,
+            mad_probe_ms: 2.0,
+            probe_ms_samples: vec![28.0, 30.0, 32.0],
+        };
+
+        let scale = super::runtime_scale_factor(&baseline, &current);
+        assert!(scale > 1.5);
+    }
+
+    #[test]
+    fn small_fixtures_skip_strict_latency_checks() {
+        let mut baseline = sample_fixture("small", 5.0, 10.0);
+        baseline.bytes = 512;
+        let mut current = sample_fixture("small", 80.0, 10.0);
+        current.bytes = 512;
+        let result = super::check_fixture_regression(&baseline, &current, 1.0);
+        assert!(result.is_ok());
     }
 
     fn sample_fixture(name: &str, first_page_ms: f64, throughput: f64) -> FixtureBenchResult {

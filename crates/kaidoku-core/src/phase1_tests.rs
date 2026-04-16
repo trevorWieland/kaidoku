@@ -3,15 +3,19 @@ use crate::{
 };
 use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const REQUIRED_PHASE1_FIXTURES: [&str; 3] = [
+const REQUIRED_PHASE1_FIXTURES: [&str; 6] = [
     "doclaynet_simple_text.pdf",
     "doclaynet_multi_column.pdf",
     "doclaynet_mixed_content.pdf",
+    "pdfjs_copy_paste_ligatures.pdf",
+    "pdfjs_arabic_cid_true_type.pdf",
+    "pdfjs_identity_to_unicode_map_char_code_of.pdf",
 ];
 
 #[derive(Debug, serde::Deserialize)]
@@ -23,16 +27,6 @@ struct ProvenanceManifest {
 struct ProvenanceFixture {
     name: String,
     sha256: String,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct BenchBaseline {
-    fixtures: Vec<BenchFixture>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct BenchFixture {
-    fixture: String,
 }
 
 #[test]
@@ -164,12 +158,7 @@ fn fixture_sets_are_pinned_and_in_parity() {
         "golden fixture names must exactly match corpus fixture set"
     );
 
-    let bench = load_benchmark_baseline();
-    let bench_names = bench
-        .fixtures
-        .iter()
-        .map(|fixture| fixture.fixture.clone())
-        .collect::<BTreeSet<String>>();
+    let bench_names = load_benchmark_baseline_fixture_names();
     assert_eq!(
         bench_names, expected,
         "benchmark baseline fixture set must exactly match required fixture set"
@@ -261,6 +250,72 @@ fn decoded_text_avoids_control_character_gibberish() {
                     page.page_number.get(),
                     fixture_path.display(),
                     text,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn span_bboxes_cover_char_bboxes_per_operation() {
+    for fixture_path in phase1_fixture_paths() {
+        let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+        let document = extract_pdf(&bytes, ExtractOptions::default())
+            .expect("fixture extraction should succeed");
+
+        for page in document.pages {
+            let mut grouped = BTreeMap::new();
+            for element in page.elements {
+                let source_ref = element.source_ref();
+                let key = (source_ref.stream_index(), source_ref.operation_index());
+                grouped.entry(key).or_insert_with(Vec::new).push(element);
+            }
+
+            for ((_stream, _operation), elements) in grouped {
+                let spans = elements
+                    .iter()
+                    .filter_map(|element| element.span_payload().map(|_| element.bbox()))
+                    .collect::<Vec<_>>();
+                let chars = elements
+                    .iter()
+                    .filter_map(|element| element.char_payload().map(|_| element.bbox()))
+                    .collect::<Vec<_>>();
+
+                if spans.is_empty() || chars.is_empty() {
+                    continue;
+                }
+
+                for char_bbox in chars {
+                    let covered = spans
+                        .iter()
+                        .any(|span_bbox| bbox_contains(*span_bbox, char_bbox, 0.25));
+                    assert!(
+                        covered,
+                        "char bbox was not covered by any span bbox on page {} in {}",
+                        page.page_number.get(),
+                        fixture_path.display(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bboxes_remain_within_page_bounds_with_tolerance() {
+    for fixture_path in phase1_fixture_paths() {
+        let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+        let document = extract_pdf(&bytes, ExtractOptions::default())
+            .expect("fixture extraction should succeed");
+
+        for page in document.pages {
+            for element in page.elements {
+                let bbox = element.bbox();
+                assert!(
+                    bbox.width() <= page.width * 20.0 && bbox.height() <= page.height * 20.0,
+                    "bbox dimensions are implausibly large on page {} in {}",
+                    page.page_number.get(),
+                    fixture_path.display(),
                 );
             }
         }
@@ -366,10 +421,38 @@ fn load_manifest() -> ProvenanceManifest {
     serde_json::from_str(&manifest_content).expect("provenance manifest is valid json")
 }
 
-fn load_benchmark_baseline() -> BenchBaseline {
+fn load_benchmark_baseline_fixture_names() -> BTreeSet<String> {
     let baseline_path = golden_dir().join("benchmarks.baseline.json");
     let content = fs::read_to_string(&baseline_path).expect("benchmark baseline is readable");
-    serde_json::from_str(&content).expect("benchmark baseline is valid json")
+    let value: serde_json::Value =
+        serde_json::from_str(&content).expect("benchmark baseline is valid json");
+
+    if let Some(reports) = value.get("reports").and_then(serde_json::Value::as_array) {
+        let mut names = BTreeSet::new();
+        for report in reports {
+            if let Some(fixtures) = report.get("fixtures").and_then(serde_json::Value::as_array) {
+                for fixture in fixtures {
+                    if let Some(name) = fixture.get("fixture").and_then(serde_json::Value::as_str) {
+                        names.insert(name.to_string());
+                    }
+                }
+            }
+        }
+        return names;
+    }
+
+    value
+        .get("fixtures")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|fixture| {
+            fixture
+                .get("fixture")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string)
+        })
+        .collect()
 }
 
 fn golden_path_for(fixture_path: &Path) -> PathBuf {
@@ -393,4 +476,21 @@ fn workspace_root() -> PathBuf {
         .join("../..")
         .canonicalize()
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
+}
+
+fn bbox_contains(outer: crate::BBox, inner: crate::BBox, tolerance: f64) -> bool {
+    let outer_left = outer.x() - tolerance;
+    let outer_top = outer.y() - tolerance;
+    let outer_right = outer.x() + outer.width() + tolerance;
+    let outer_bottom = outer.y() + outer.height() + tolerance;
+
+    let inner_left = inner.x();
+    let inner_top = inner.y();
+    let inner_right = inner.x() + inner.width();
+    let inner_bottom = inner.y() + inner.height();
+
+    inner_left >= outer_left
+        && inner_top >= outer_top
+        && inner_right <= outer_right
+        && inner_bottom <= outer_bottom
 }

@@ -6,14 +6,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::thread;
 use std::time::Instant;
-use std::time::{SystemTime, UNIX_EPOCH};
-
+mod environment;
 mod regression;
+use environment::benchmark_environment;
 
-const BENCH_SCHEMA_VERSION: &str = "kaidoku.phase1.bench.v3";
+const BENCH_SCHEMA_VERSION: &str = "kaidoku.phase1.bench.v4";
 const THROUGHPUT_MAX_REGRESSION_RATIO: f64 = 0.15;
 const LATENCY_MAX_REGRESSION_RATIO: f64 = 0.15;
 const NOISE_SIGMA_MULTIPLIER: f64 = 2.0;
@@ -23,10 +21,13 @@ const FULL_LATENCY_ABSOLUTE_MS_SLACK: f64 = 8.0;
 const FIRST_PAGE_LATENCY_ABSOLUTE_MS_SLACK: f64 = 6.0;
 const THROUGHPUT_ABSOLUTE_MIB_DELTA: f64 = 1.0;
 const BYTES_PER_MIB: f64 = 1024.0 * 1024.0;
-const REQUIRED_PHASE1_FIXTURES: [&str; 3] = [
+const REQUIRED_PHASE1_FIXTURES: [&str; 6] = [
     "doclaynet_simple_text.pdf",
     "doclaynet_multi_column.pdf",
     "doclaynet_mixed_content.pdf",
+    "pdfjs_copy_paste_ligatures.pdf",
+    "pdfjs_arabic_cid_true_type.pdf",
+    "pdfjs_identity_to_unicode_map_char_code_of.pdf",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +42,7 @@ struct BenchReport {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct BenchEnvironment {
     generated_at_unix_seconds: u64,
+    runner_class: String,
     os: String,
     arch: String,
     cpu_logical_cores: usize,
@@ -48,6 +50,12 @@ struct BenchEnvironment {
     rustc_version: String,
     hostname: Option<String>,
     cpu_governor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BenchBaselineStore {
+    schema_version: String,
+    reports: Vec<BenchReport>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,17 +145,13 @@ fn run_phase1_bench(command: &Phase1BenchCommand) -> Result<()> {
         },
     )?;
 
-    let mut serialized = serde_json::to_string_pretty(&report)?;
-    serialized.push('\n');
-    fs::write(&command.output, serialized).with_context(|| {
-        format!(
-            "failed writing benchmark report {}",
-            command.output.display()
-        )
-    })?;
+    write_bench_report(&command.output, &report)?;
 
     if command.check {
-        let baseline = load_bench_report(&command.baseline)?;
+        let baseline = load_bench_report_for_runner_class(
+            &command.baseline,
+            &report.environment.runner_class,
+        )?;
         regression::check_bench_regression(&baseline, &report)?;
     }
 
@@ -179,51 +183,6 @@ fn benchmark_runtime_calibration(
     })
 }
 
-fn benchmark_environment() -> BenchEnvironment {
-    BenchEnvironment {
-        generated_at_unix_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .map_or(0, |duration| duration.as_secs()),
-        os: std::env::consts::OS.to_string(),
-        arch: std::env::consts::ARCH.to_string(),
-        cpu_logical_cores: thread::available_parallelism().map_or(1, usize::from),
-        profile: if cfg!(debug_assertions) {
-            "debug".to_string()
-        } else {
-            "release".to_string()
-        },
-        rustc_version: rustc_version(),
-        hostname: hostname(),
-        cpu_governor: cpu_governor(),
-    }
-}
-
-fn rustc_version() -> String {
-    Command::new("rustc")
-        .arg("--version")
-        .output()
-        .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map_or_else(|| "unknown".to_string(), |value| value.trim().to_string())
-}
-
-fn hostname() -> Option<String> {
-    std::env::var("HOSTNAME")
-        .ok()
-        .or_else(|| std::env::var("COMPUTERNAME").ok())
-}
-
-fn cpu_governor() -> Option<String> {
-    if std::env::consts::OS != "linux" {
-        return None;
-    }
-
-    fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
-        .ok()
-        .map(|value| value.trim().to_string())
-}
-
 fn run_calibration_probe() {
     let mut state = 0_u64;
     for i in 0_u64..500_000 {
@@ -243,9 +202,7 @@ fn benchmark_fixture(
         fs::read(path).with_context(|| format!("failed reading fixture {}", path.display()))?;
     let bytes_len = bytes.len();
     let bytes_u64 = u64::try_from(bytes_len).context("fixture size does not fit into u64")?;
-    let bytes_u32 = u32::try_from(bytes_len)
-        .context("fixture size does not fit into u32 for throughput math")?;
-    let fixture_mib = f64::from(bytes_u32) / BYTES_PER_MIB;
+    let fixture_mib = bytes_to_mib(bytes_u64);
 
     for _ in 0..warmup_iterations {
         run_full_extraction(&bytes, path)?;
@@ -380,13 +337,94 @@ fn validate_required_fixture_set(actual: &BTreeSet<String>) -> Result<()> {
     );
 }
 
-fn load_bench_report(path: &Path) -> Result<BenchReport> {
+fn write_bench_report(path: &Path, report: &BenchReport) -> Result<()> {
+    if is_baseline_path(path) {
+        let mut store = if path.exists() {
+            load_bench_baseline_store(path).unwrap_or(BenchBaselineStore {
+                schema_version: BENCH_SCHEMA_VERSION.to_string(),
+                reports: Vec::new(),
+            })
+        } else {
+            BenchBaselineStore {
+                schema_version: BENCH_SCHEMA_VERSION.to_string(),
+                reports: Vec::new(),
+            }
+        };
+
+        if store.schema_version != BENCH_SCHEMA_VERSION {
+            store = BenchBaselineStore {
+                schema_version: BENCH_SCHEMA_VERSION.to_string(),
+                reports: Vec::new(),
+            };
+        }
+
+        if let Some(existing) = store
+            .reports
+            .iter_mut()
+            .find(|candidate| candidate.environment.runner_class == report.environment.runner_class)
+        {
+            *existing = report.clone();
+        } else {
+            store.reports.push(report.clone());
+            store.reports.sort_by(|left, right| {
+                left.environment
+                    .runner_class
+                    .cmp(&right.environment.runner_class)
+            });
+        }
+
+        let mut serialized = serde_json::to_string_pretty(&store)?;
+        serialized.push('\n');
+        fs::write(path, serialized)
+            .with_context(|| format!("failed writing benchmark report {}", path.display()))?;
+        return Ok(());
+    }
+
+    let mut serialized = serde_json::to_string_pretty(report)?;
+    serialized.push('\n');
+    fs::write(path, serialized)
+        .with_context(|| format!("failed writing benchmark report {}", path.display()))?;
+    Ok(())
+}
+
+fn load_bench_report_for_runner_class(path: &Path, runner_class: &str) -> Result<BenchReport> {
+    let store = load_bench_baseline_store(path)?;
+    let available_classes = store
+        .reports
+        .iter()
+        .map(|report| report.environment.runner_class.clone())
+        .collect::<Vec<_>>();
+    store
+        .reports
+        .into_iter()
+        .find(|report| report.environment.runner_class == runner_class)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "benchmark baseline {} is missing runner class `{}`; available classes: [{}]",
+                path.display(),
+                runner_class,
+                available_classes.join(", "),
+            )
+        })
+}
+
+fn load_bench_baseline_store(path: &Path) -> Result<BenchBaselineStore> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed reading baseline benchmark {}", path.display()))?;
 
+    if let Ok(store) = serde_json::from_str::<BenchBaselineStore>(&content) {
+        if store.schema_version != BENCH_SCHEMA_VERSION {
+            bail!(
+                "unexpected benchmark schema {} in {}",
+                store.schema_version,
+                path.display(),
+            );
+        }
+        return Ok(store);
+    }
+
     let report: BenchReport = serde_json::from_str(&content)
         .with_context(|| format!("failed parsing baseline benchmark {}", path.display()))?;
-
     if report.schema_version != BENCH_SCHEMA_VERSION {
         bail!(
             "unexpected benchmark schema {} in {}",
@@ -395,13 +433,19 @@ fn load_bench_report(path: &Path) -> Result<BenchReport> {
         );
     }
 
-    Ok(report)
+    Ok(BenchBaselineStore {
+        schema_version: BENCH_SCHEMA_VERSION.to_string(),
+        reports: vec![report],
+    })
+}
+
+fn is_baseline_path(path: &Path) -> bool {
+    path.file_name() == Some(OsStr::new("benchmarks.baseline.json"))
 }
 
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let midpoint = values.len() / 2;
-
     if values.len() % 2 == 0 {
         f64::midpoint(values[midpoint - 1], values[midpoint])
     } else {
@@ -423,4 +467,34 @@ fn mad(values: &[f64], median_value: f64) -> f64 {
 
 fn round_metric(value: f64) -> f64 {
     (value * 1000.0).round() / 1000.0
+}
+
+fn bytes_to_mib(bytes: u64) -> f64 {
+    let high = u32::try_from(bytes >> 32).expect("high u64 half fits u32");
+    let low = u32::try_from(bytes & u64::from(u32::MAX)).expect("low u64 half fits u32");
+    let bytes_f64 = f64::from(high) * 4_294_967_296.0 + f64::from(low);
+    bytes_f64 / BYTES_PER_MIB
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bytes_to_mib;
+    use crate::bench_cmd::environment::{cpu_core_tier, runner_class};
+
+    #[test]
+    fn bytes_to_mib_handles_values_larger_than_4gib() {
+        let five_gib = 5_u64 * 1024 * 1024 * 1024;
+        let mib = bytes_to_mib(five_gib);
+        assert!(mib > 5_000.0);
+        assert!(mib < 5_200.0);
+    }
+
+    #[test]
+    fn runner_class_is_stable_and_runner_aware() {
+        let class = runner_class("linux", "x86_64", "release", 12, "rustc 1.94.1 (abc)");
+        assert!(class.contains("linux-x86_64-release"));
+        assert!(class.contains("core-large"));
+        assert!(class.contains("rustc1.94"));
+        assert_eq!(cpu_core_tier(2), "core-small");
+    }
 }

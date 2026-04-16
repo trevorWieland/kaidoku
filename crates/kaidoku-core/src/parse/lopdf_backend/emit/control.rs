@@ -2,6 +2,57 @@ use crate::{CancellationToken, ExtractError, FontDescriptor, FontId, PageNumber}
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ExtractionStage {
+    ExtractStart,
+    DocumentLoaded,
+    PageIteration,
+    ExtractPageStart,
+    ExtractPageElementsStart,
+    ExtractPageStream,
+    ProcessStreamDecode,
+    ProcessStreamParseOperation,
+    ProcessStreamOperation,
+    FormXObjectEnter,
+    DecodeContentStreamStart,
+    DecodeContentStreamFilter,
+    DecodeZlibChunk,
+    DecodeDeflateFallbackChunk,
+    DecodeLzwChunk,
+    DecodeAscii85,
+    DecodeAsciiHex,
+    DecodeRunLength,
+    ContentParseOperation,
+    ContentParseToken,
+}
+
+impl ExtractionStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExtractStart => "extract_start",
+            Self::DocumentLoaded => "document_loaded",
+            Self::PageIteration => "page_iteration",
+            Self::ExtractPageStart => "extract_page_start",
+            Self::ExtractPageElementsStart => "extract_page_elements_start",
+            Self::ExtractPageStream => "extract_page_stream",
+            Self::ProcessStreamDecode => "process_stream_decode",
+            Self::ProcessStreamParseOperation => "process_stream_parse_operation",
+            Self::ProcessStreamOperation => "process_stream_operation",
+            Self::FormXObjectEnter => "form_xobject_enter",
+            Self::DecodeContentStreamStart => "decode_content_stream_start",
+            Self::DecodeContentStreamFilter => "decode_content_stream_filter",
+            Self::DecodeZlibChunk => "decode_zlib_chunk",
+            Self::DecodeDeflateFallbackChunk => "decode_deflate_fallback_chunk",
+            Self::DecodeLzwChunk => "decode_lzw_chunk",
+            Self::DecodeAscii85 => "decode_ascii85",
+            Self::DecodeAsciiHex => "decode_ascii_hex",
+            Self::DecodeRunLength => "decode_run_length",
+            Self::ContentParseOperation => "content_parse_operation",
+            Self::ContentParseToken => "content_parse_token",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FontRegistry {
     ids_by_name: BTreeMap<String, FontId>,
@@ -58,7 +109,7 @@ impl ExtractionControl {
 
     pub(crate) fn checkpoint(
         &self,
-        stage: &'static str,
+        stage: ExtractionStage,
         page_number: Option<PageNumber>,
     ) -> Result<(), ExtractError> {
         if self
@@ -68,7 +119,7 @@ impl ExtractionControl {
         {
             return Err(ExtractError::ExtractionCancelled {
                 page_number: page_number.map(PageNumber::get),
-                stage,
+                stage: stage.as_str(),
             });
         }
 
@@ -77,7 +128,7 @@ impl ExtractionControl {
         if elapsed_ms >= self.timeout_ms {
             return Err(ExtractError::ExtractionTimeoutExceeded {
                 page_number: page_number.map(PageNumber::get),
-                stage,
+                stage: stage.as_str(),
                 timeout_ms: self.timeout_ms,
                 elapsed_ms,
             });

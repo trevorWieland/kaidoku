@@ -366,8 +366,10 @@ impl SourceRef {
     #[must_use]
     pub fn stable_key(self) -> String {
         format!(
-            "p{}-o{}-s{}-i{}",
+            "p{}-po{}g{}-o{}-s{}-i{}",
             self.page_number.get(),
+            self.page_object_number,
+            self.page_object_generation,
             self.operation_index,
             self.stream_index,
             self.element_index

@@ -1,0 +1,599 @@
+{
+  "schema_version": "kaidoku.phase1.v2",
+  "source": {
+    "backend": "lopdf",
+    "input_sha256": "3a6948ca33558a0f1c9dabf70902e14e263e814b6a12da44ba8ec9439c0bafdd",
+    "input_bytes": 32408
+  },
+  "fonts": [
+    {
+      "id": 1,
+      "name": "UBGNXP+TimesNewRomanPSMT"
+    },
+    {
+      "id": 2,
+      "name": "XCKPHN+TimesNewRomanPSMT"
+    }
+  ],
+  "pages": [
+    {
+      "page_number": 1,
+      "width": 142.74290084838867,
+      "height": 14.218017578125,
+      "elements": [
+        {
+          "kind": "span",
+          "bbox": {
+            "x": -24.477,
+            "y": -10836.13,
+            "width": 12.931,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 10,
+            "element_index": 0
+          },
+          "payload": {
+            "text": "abcdef",
+            "font_id": 1,
+            "font_size": 1.0
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -20.598,
+            "y": -10836.13,
+            "width": 5.326,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 10,
+            "element_index": 1
+          },
+          "payload": {
+            "text": "a",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 0
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -18.018,
+            "y": -10836.13,
+            "width": 6.0,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 10,
+            "element_index": 2
+          },
+          "payload": {
+            "text": "b",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 1
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -20.18,
+            "y": -10836.13,
+            "width": 5.326,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 10,
+            "element_index": 3
+          },
+          "payload": {
+            "text": "c",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 2
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -17.546,
+            "y": -10836.13,
+            "width": 6.0,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 10,
+            "element_index": 4
+          },
+          "payload": {
+            "text": "d",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 3
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -19.761,
+            "y": -10836.13,
+            "width": 5.326,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 10,
+            "element_index": 5
+          },
+          "payload": {
+            "text": "e",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 4
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -24.477,
+            "y": -10836.13,
+            "width": 3.996,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 10,
+            "element_index": 6
+          },
+          "payload": {
+            "text": "f",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 5
+          }
+        },
+        {
+          "kind": "span",
+          "bbox": {
+            "x": -14.064,
+            "y": -10836.13,
+            "width": 24.282,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 12,
+            "element_index": 0
+          },
+          "payload": {
+            "text": "ﬀﬁﬂﬃﬄﬅﬆ",
+            "font_id": 2,
+            "font_size": 1.0
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -12.263,
+            "y": -10836.13,
+            "width": 7.248,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 12,
+            "element_index": 1
+          },
+          "payload": {
+            "text": "ﬀ",
+            "font_id": 2,
+            "font_size": 1.0,
+            "char_index": 0
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -14.064,
+            "y": -10836.13,
+            "width": 6.674,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 12,
+            "element_index": 2
+          },
+          "payload": {
+            "text": "ﬁ",
+            "font_id": 2,
+            "font_size": 1.0,
+            "char_index": 1
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -13.755,
+            "y": -10836.13,
+            "width": 6.674,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 12,
+            "element_index": 3
+          },
+          "payload": {
+            "text": "ﬂ",
+            "font_id": 2,
+            "font_size": 1.0,
+            "char_index": 2
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 0.052,
+            "y": -10836.13,
+            "width": 10.166,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 12,
+            "element_index": 4
+          },
+          "payload": {
+            "text": "ﬃ",
+            "font_id": 2,
+            "font_size": 1.0,
+            "char_index": 3
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 0.055,
+            "y": -10836.13,
+            "width": 9.984,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 12,
+            "element_index": 5
+          },
+          "payload": {
+            "text": "ﬄ",
+            "font_id": 2,
+            "font_size": 1.0,
+            "char_index": 4
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -11.62,
+            "y": -10836.13,
+            "width": 6.896,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 12,
+            "element_index": 6
+          },
+          "payload": {
+            "text": "ﬅ",
+            "font_id": 2,
+            "font_size": 1.0,
+            "char_index": 5
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -7.514,
+            "y": -10836.13,
+            "width": 7.828,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 12,
+            "element_index": 7
+          },
+          "payload": {
+            "text": "ﬆ",
+            "font_id": 2,
+            "font_size": 1.0,
+            "char_index": 6
+          }
+        },
+        {
+          "kind": "span",
+          "bbox": {
+            "x": -25.269,
+            "y": -10836.13,
+            "width": 35.515,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 0
+          },
+          "payload": {
+            "text": "ghijklmno",
+            "font_id": 1,
+            "font_size": 1.0
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -14.597,
+            "y": -10836.13,
+            "width": 6.0,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 1
+          },
+          "payload": {
+            "text": "g",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 0
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -14.347,
+            "y": -10836.13,
+            "width": 6.0,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 2
+          },
+          "payload": {
+            "text": "h",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 1
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -25.269,
+            "y": -10836.13,
+            "width": 3.334,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 3
+          },
+          "payload": {
+            "text": "i",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 2
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -25.192,
+            "y": -10836.13,
+            "width": 3.334,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 4
+          },
+          "payload": {
+            "text": "j",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 3
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -13.819,
+            "y": -10836.13,
+            "width": 6.0,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 5
+          },
+          "payload": {
+            "text": "k",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 4
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -24.975,
+            "y": -10836.13,
+            "width": 3.334,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 6
+          },
+          "payload": {
+            "text": "l",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 5
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 0.912,
+            "y": -10836.13,
+            "width": 9.334,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 7
+          },
+          "payload": {
+            "text": "m",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 6
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -13.041,
+            "y": -10836.13,
+            "width": 6.0,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 8
+          },
+          "payload": {
+            "text": "n",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 7
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": -12.791,
+            "y": -10836.13,
+            "width": 6.0,
+            "height": 12.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 2,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 14,
+            "element_index": 9
+          },
+          "payload": {
+            "text": "o",
+            "font_id": 1,
+            "font_size": 1.0,
+            "char_index": 8
+          }
+        }
+      ]
+    }
+  ]
+}

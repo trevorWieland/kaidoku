@@ -1,0 +1,183 @@
+{
+  "schema_version": "kaidoku.phase1.v2",
+  "source": {
+    "backend": "lopdf",
+    "input_sha256": "81243ff4cca5f7898688008224247d88534cd03e76ac3cbbdc38f925cfbee18f",
+    "input_bytes": 651
+  },
+  "fonts": [
+    {
+      "id": 1,
+      "name": "Times-Roman"
+    }
+  ],
+  "pages": [
+    {
+      "page_number": 1,
+      "width": 200.0,
+      "height": 50.0,
+      "elements": [
+        {
+          "kind": "span",
+          "bbox": {
+            "x": 25.0,
+            "y": 400.0,
+            "width": 105.0,
+            "height": 20.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 3,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 3,
+            "element_index": 0
+          },
+          "payload": {
+            "text": "ABCdef",
+            "font_id": 1,
+            "font_size": 20.0
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 25.0,
+            "y": 400.0,
+            "width": 2.5,
+            "height": 20.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 3,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 3,
+            "element_index": 1
+          },
+          "payload": {
+            "text": "A",
+            "font_id": 1,
+            "font_size": 20.0,
+            "char_index": 0
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 31.25,
+            "y": 400.0,
+            "width": 2.5,
+            "height": 20.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 3,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 3,
+            "element_index": 2
+          },
+          "payload": {
+            "text": "B",
+            "font_id": 1,
+            "font_size": 20.0,
+            "char_index": 1
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 37.5,
+            "y": 400.0,
+            "width": 2.5,
+            "height": 20.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 3,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 3,
+            "element_index": 3
+          },
+          "payload": {
+            "text": "C",
+            "font_id": 1,
+            "font_size": 20.0,
+            "char_index": 2
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 43.75,
+            "y": 400.0,
+            "width": 2.5,
+            "height": 20.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 3,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 3,
+            "element_index": 4
+          },
+          "payload": {
+            "text": "d",
+            "font_id": 1,
+            "font_size": 20.0,
+            "char_index": 3
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 100.0,
+            "y": 400.0,
+            "width": 5.0,
+            "height": 20.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 3,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 3,
+            "element_index": 5
+          },
+          "payload": {
+            "text": "e",
+            "font_id": 1,
+            "font_size": 20.0,
+            "char_index": 4
+          }
+        },
+        {
+          "kind": "char",
+          "bbox": {
+            "x": 125.0,
+            "y": 400.0,
+            "width": 5.0,
+            "height": 20.0
+          },
+          "source_ref": {
+            "page_number": 1,
+            "page_object_number": 3,
+            "page_object_generation": 0,
+            "stream_index": 0,
+            "operation_index": 3,
+            "element_index": 6
+          },
+          "payload": {
+            "text": "f",
+            "font_id": 1,
+            "font_size": 20.0,
+            "char_index": 5
+          }
+        }
+      ]
+    }
+  ]
+}

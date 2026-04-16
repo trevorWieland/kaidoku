@@ -2,6 +2,13 @@
   "dataset": "DocLayNet",
   "dataset_license": "CDLA-Permissive-1.0",
   "dataset_version": "1.0.0",
+  "additional_sources": [
+    {
+      "name": "Mozilla pdf.js test corpus",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/mozilla/pdf.js/tree/master/test/pdfs"
+    }
+  ],
   "fixtures": [
     {
       "doc_category": "financial_reports",
@@ -35,6 +42,42 @@
       "size_bytes": 104180,
       "source_zip_path": "PDF/19fb12fea8765914fd4bc8d86c921d64da953bba0f29a6ef10f789ccb97a2d1d.pdf",
       "split": "val"
+    },
+    {
+      "doc_category": "multilingual",
+      "hash": null,
+      "name": "pdfjs_copy_paste_ligatures.pdf",
+      "profile": "ligatures",
+      "selection_basis": "pdf.js fixture with ligature copy/paste mapping behavior.",
+      "sha256": "3a6948ca33558a0f1c9dabf70902e14e263e814b6a12da44ba8ec9439c0bafdd",
+      "size_bytes": 32408,
+      "source_zip_path": null,
+      "source_url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/copy_paste_ligatures.pdf",
+      "split": null
+    },
+    {
+      "doc_category": "multilingual",
+      "hash": null,
+      "name": "pdfjs_arabic_cid_true_type.pdf",
+      "profile": "rtl",
+      "selection_basis": "pdf.js Arabic CID TrueType fixture for RTL extraction.",
+      "sha256": "1cad1de912ba29f89a6d8b08bc5b0f84382874ffedab2c8f9e05ef608c265bb1",
+      "size_bytes": 39370,
+      "source_zip_path": null,
+      "source_url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/ArabicCIDTrueType.pdf",
+      "split": null
+    },
+    {
+      "doc_category": "multilingual",
+      "hash": null,
+      "name": "pdfjs_identity_to_unicode_map_char_code_of.pdf",
+      "profile": "multibyte-cmap",
+      "selection_basis": "pdf.js ToUnicode CMap fixture with non-trivial character code mapping.",
+      "sha256": "81243ff4cca5f7898688008224247d88534cd03e76ac3cbbdc38f925cfbee18f",
+      "size_bytes": 651,
+      "source_zip_path": null,
+      "source_url": "https://raw.githubusercontent.com/mozilla/pdf.js/master/test/pdfs/IdentityToUnicodeMap_charCodeOf.pdf",
+      "split": null
     }
   ],
   "retrieved_on": "2026-04-15",

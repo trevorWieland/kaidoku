@@ -1,3 +1,4 @@
+mod content_parser;
 mod control;
 pub(crate) mod decode;
 mod fonts;
@@ -13,13 +14,13 @@ mod text;
 use super::resources::{self, PageGeometry, ResourceScope};
 use crate::{BBox, ExtractError, FontId, ImagePayload, PageNumber, RawElement, SourceRef};
 use fonts::FontCatalog;
-use lopdf::{Document, Object, ObjectId, Stream, content::Content};
+use lopdf::{Document, Object, ObjectId, Stream};
 use state::{GraphicsState, TextState};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-pub(crate) use control::ExtractionControl;
 pub(super) use control::FontRegistry;
+pub(crate) use control::{ExtractionControl, ExtractionStage};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OperationCursor {
@@ -259,7 +260,7 @@ pub(super) fn extract_page_elements(
 ) -> Result<Vec<RawElement>, ExtractError> {
     config
         .control
-        .checkpoint("extract_page_elements_start", Some(page_number))?;
+        .checkpoint(ExtractionStage::ExtractPageElementsStart, Some(page_number))?;
 
     let mut elements = Vec::new();
     let font_catalog = FontCatalog::from_page(document, page_id)?;
@@ -303,7 +304,7 @@ pub(super) fn extract_page_elements(
     for stream_id in &stream_ids {
         runtime
             .control
-            .checkpoint("extract_page_stream", Some(page_number))?;
+            .checkpoint(ExtractionStage::ExtractPageStream, Some(page_number))?;
 
         let stream = runtime
             .document
@@ -338,9 +339,10 @@ fn process_stream(
     let previous_stream_index = emit.stream_index;
     emit.stream_index = stream_index;
 
-    runtime
-        .control
-        .checkpoint("process_stream_decode", Some(emit.page_number()))?;
+    runtime.control.checkpoint(
+        ExtractionStage::ProcessStreamDecode,
+        Some(emit.page_number()),
+    )?;
 
     let content_bytes = decode::decode_content_stream_bounded(
         stream,
@@ -367,14 +369,22 @@ fn process_stream(
         .remaining_decoded_budget
         .saturating_sub(content_bytes.len());
 
-    let content = Content::decode(&content_bytes).map_err(|error| ExtractError::ContentDecode {
-        reason: error.to_string(),
-    })?;
+    let operations = content_parser::parse_content_operations_bounded(
+        &content_bytes,
+        emit.page_number(),
+        runtime.control,
+    )?;
 
-    for (op_idx, operation) in content.operations.iter().enumerate() {
-        runtime
-            .control
-            .checkpoint("process_stream_operation", Some(emit.page_number()))?;
+    runtime.control.checkpoint(
+        ExtractionStage::ProcessStreamParseOperation,
+        Some(emit.page_number()),
+    )?;
+
+    for (op_idx, operation) in operations.iter().enumerate() {
+        runtime.control.checkpoint(
+            ExtractionStage::ProcessStreamOperation,
+            Some(emit.page_number()),
+        )?;
 
         *runtime.total_operations =
             runtime

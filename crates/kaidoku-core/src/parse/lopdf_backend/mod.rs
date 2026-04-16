@@ -6,7 +6,7 @@ use crate::{
     BACKEND_ID, ExtractError, ExtractOptions, ExtractionDocument, ExtractionPage, ExtractionSource,
     PageNumber, SCHEMA_VERSION, Sha256Digest,
 };
-use emit::{ExtractionControl, ExtractionLimits, FontRegistry, PageEmitConfig};
+use emit::{ExtractionControl, ExtractionLimits, ExtractionStage, FontRegistry, PageEmitConfig};
 use lopdf::{Document, ObjectId};
 use sha2::{Digest, Sha256};
 
@@ -21,12 +21,12 @@ impl ParserBackend for LopdfBackend {
     ) -> Result<ExtractionDocument, ExtractError> {
         let control =
             ExtractionControl::new(options.max_wall_time_ms(), options.cancellation_token());
-        control.checkpoint("extract_start", None)?;
+        control.checkpoint(ExtractionStage::ExtractStart, None)?;
 
         let document = Document::load_mem(input_bytes).map_err(|error| ExtractError::PdfParse {
             reason: error.to_string(),
         })?;
-        control.checkpoint("document_loaded", None)?;
+        control.checkpoint(ExtractionStage::DocumentLoaded, None)?;
 
         let pages = document.get_pages();
         let total_pages =
@@ -47,7 +47,10 @@ impl ParserBackend for LopdfBackend {
         let mut font_registry = FontRegistry::default();
         let mut remaining_decoded_budget = options.max_total_decoded_stream_bytes();
         for (page_number, page_id) in pages {
-            control.checkpoint("page_iteration", PageNumber::new(page_number).ok())?;
+            control.checkpoint(
+                ExtractionStage::PageIteration,
+                PageNumber::new(page_number).ok(),
+            )?;
             if !selection.includes(page_number) {
                 continue;
             }
@@ -91,7 +94,7 @@ fn extract_page(
     remaining_decoded_budget: &mut usize,
 ) -> Result<ExtractionPage, ExtractError> {
     let page_number = PageNumber::new(page_number)?;
-    control.checkpoint("extract_page_start", Some(page_number))?;
+    control.checkpoint(ExtractionStage::ExtractPageStart, Some(page_number))?;
     let page_geometry = resources::page_geometry(
         document,
         page_number,

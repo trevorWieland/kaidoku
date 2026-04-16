@@ -5,7 +5,7 @@ max_lines := "500"
 toml_globs := "Cargo.toml bin/*/Cargo.toml crates/*/Cargo.toml .cargo/*.toml .config/*.toml rust-toolchain.toml clippy.toml taplo.toml deny.toml rustfmt.toml lefthook.yml"
 foundation_crates := "kaidoku-core"
 capability_crates := "kaidoku-cli kaidoku-server kaidoku-python"
-phase1_fixtures := "tests/corpus/phase1/doclaynet_simple_text.pdf tests/corpus/phase1/doclaynet_multi_column.pdf tests/corpus/phase1/doclaynet_mixed_content.pdf"
+phase1_fixtures := "tests/corpus/phase1/doclaynet_simple_text.pdf tests/corpus/phase1/doclaynet_multi_column.pdf tests/corpus/phase1/doclaynet_mixed_content.pdf tests/corpus/phase1/pdfjs_copy_paste_ligatures.pdf tests/corpus/phase1/pdfjs_arabic_cid_true_type.pdf tests/corpus/phase1/pdfjs_identity_to_unicode_map_char_code_of.pdf"
 
 # Default recipe: show available commands
 
@@ -143,7 +143,7 @@ phase1-gate:
     @{{ cargo }} run --release -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --check --fixtures tests/corpus/phase1 --baseline tests/golden/phase1/benchmarks.baseline.json --output target/phase1/benchmarks.current.json
 
 phase1-demo:
-    @{{ cargo }} run -p kaidoku-cli -- extract --input tests/corpus/phase1/doclaynet_simple_text.pdf --input tests/corpus/phase1/doclaynet_multi_column.pdf --input tests/corpus/phase1/doclaynet_mixed_content.pdf --output target/phase1/demo
+    @{{ cargo }} run -p kaidoku-cli -- extract --input tests/corpus/phase1/doclaynet_simple_text.pdf --input tests/corpus/phase1/doclaynet_multi_column.pdf --input tests/corpus/phase1/doclaynet_mixed_content.pdf --input tests/corpus/phase1/pdfjs_copy_paste_ligatures.pdf --input tests/corpus/phase1/pdfjs_arabic_cid_true_type.pdf --input tests/corpus/phase1/pdfjs_identity_to_unicode_map_char_code_of.pdf --output target/phase1/demo
 
 phase1-fuzz-smoke:
     @cd fuzz && cargo +nightly fuzz run decode_filters -- -max_total_time=20

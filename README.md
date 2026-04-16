@@ -34,6 +34,9 @@ cargo run -p kaidoku-cli -- extract \
   --input tests/corpus/phase1/doclaynet_simple_text.pdf \
   --input tests/corpus/phase1/doclaynet_multi_column.pdf \
   --input tests/corpus/phase1/doclaynet_mixed_content.pdf \
+  --input tests/corpus/phase1/pdfjs_copy_paste_ligatures.pdf \
+  --input tests/corpus/phase1/pdfjs_arabic_cid_true_type.pdf \
+  --input tests/corpus/phase1/pdfjs_identity_to_unicode_map_char_code_of.pdf \
   --output target/phase1/demo
 ```
 
@@ -44,7 +47,8 @@ just phase1-bench
 ```
 
 `phase1-bench` and `phase1-gate` run benchmarks with `--release` and capture host metadata
-(OS/arch/cores/profile/rustc/governor when available) in the benchmark report.
+(OS/arch/cores/profile/rustc/governor when available) in the benchmark report. Baselines are
+stored with runner-class keyed reports (`kaidoku.phase1.bench.v4`) for cross-runner CI checks.
 
 Refresh the committed benchmark baseline after approved parser/benchmark methodology changes:
 

@@ -1,7 +1,9 @@
 use super::{
-    ExtractionControl, decode_ascii_hex_bounded, decode_run_length_bounded, decode_zlib_bounded,
+    ExtractionControl, decode_ascii_hex_bounded, decode_lzw_bounded, decode_run_length_bounded,
+    decode_zlib_bounded,
 };
 use crate::PageNumber;
+use weezl::{BitOrder, encode::Encoder as LzwEncoder};
 
 #[test]
 fn ascii_hex_decode_supports_odd_nibble_tail() {
@@ -47,5 +49,23 @@ fn decode_respects_timeout_guard() {
     assert!(matches!(
         result,
         Err(crate::ExtractError::ExtractionTimeoutExceeded { .. })
+    ));
+}
+
+#[test]
+fn lzw_decode_honors_cancellation_during_decode() {
+    let page_number = PageNumber::new(1).expect("page number");
+    let plain = b"HELLO LZW";
+    let mut encoder = LzwEncoder::new(BitOrder::Msb, 8);
+    let encoded_bytes = encoder.encode(plain).expect("encode");
+
+    let control = ExtractionControl::new(0, None);
+    let result = decode_lzw_bounded(&encoded_bytes, None, page_number, 0, usize::MAX, &control);
+    assert!(matches!(
+        result,
+        Err(crate::ExtractError::ExtractionTimeoutExceeded {
+            stage: "decode_lzw_chunk",
+            ..
+        })
     ));
 }

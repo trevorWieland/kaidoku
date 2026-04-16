@@ -118,17 +118,33 @@ fn catalog_decodes_and_returns_widths_for_known_and_unknown_fonts() {
     );
 
     let catalog = FontCatalog { fonts };
-    let decoded = catalog.decode_text(Some(b"F1"), b"AB");
-    assert_eq!(decoded, "AB");
+    let runs = catalog.glyph_runs(Some(b"F1"), b"AB");
+    assert_eq!(
+        runs.iter().map(|run| run.width_units).collect::<Vec<_>>(),
+        vec![450.0, 550.0]
+    );
+    assert_eq!(
+        runs.iter().map(|run| run.text.as_str()).collect::<Vec<_>>(),
+        vec!["A", "B"]
+    );
 
-    let widths = catalog.glyph_widths(Some(b"F1"), b"AB", 2);
-    assert_eq!(widths, vec![450.0, 550.0]);
+    let cid_runs = catalog.glyph_runs(Some(b"CID"), &[0x00, 0x10, 0x00, 0x0a]);
+    assert_eq!(
+        cid_runs
+            .iter()
+            .map(|run| run.width_units)
+            .collect::<Vec<_>>(),
+        vec![400.0, 300.0]
+    );
 
-    let cid_widths = catalog.glyph_widths(Some(b"CID"), &[0x00, 0x10, 0x00, 0x0a], 2);
-    assert_eq!(cid_widths, vec![400.0, 300.0]);
-
-    let fallback_widths = catalog.glyph_widths(Some(b"MISSING"), b"ZZ", 2);
-    assert_eq!(fallback_widths, vec![500.0, 500.0]);
+    let fallback_runs = catalog.glyph_runs(Some(b"MISSING"), b"ZZ");
+    assert_eq!(
+        fallback_runs
+            .iter()
+            .map(|run| run.width_units)
+            .collect::<Vec<_>>(),
+        vec![500.0, 500.0]
+    );
     assert_eq!(catalog.display_name(Some(b"F1")), Some("UnitTestFont"));
     assert_eq!(catalog.display_name(Some(b"MISSING")), None);
 }
@@ -170,8 +186,11 @@ fn from_page_builds_catalog_from_page_resources() {
     assert!(catalog.is_ok());
     let Ok(catalog) = catalog else { return };
 
-    let widths = catalog.glyph_widths(Some(b"F1"), b"A", 1);
-    assert_eq!(widths, vec![500.0]);
+    let runs = catalog.glyph_runs(Some(b"F1"), b"A");
+    assert_eq!(
+        runs.iter().map(|run| run.width_units).collect::<Vec<_>>(),
+        vec![500.0]
+    );
     assert_eq!(catalog.display_name(Some(b"F1")), Some("Helvetica"));
 }
 

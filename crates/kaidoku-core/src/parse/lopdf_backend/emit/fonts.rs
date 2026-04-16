@@ -9,6 +9,12 @@ pub(super) struct FontCatalog<'a> {
     fonts: BTreeMap<Vec<u8>, FontRuntime<'a>>,
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct GlyphRun {
+    pub(super) text: String,
+    pub(super) width_units: f64,
+}
+
 #[derive(Debug)]
 struct FontRuntime<'a> {
     display_name: String,
@@ -82,19 +88,6 @@ impl<'a> FontCatalog<'a> {
     }
 
     #[must_use]
-    pub(super) fn decode_text(&self, font_key: Option<&[u8]>, bytes: &[u8]) -> String {
-        if let Some(key) = font_key {
-            if let Some(font) = self.fonts.get(key)
-                && let Some(encoding) = &font.encoding
-                && let Ok(decoded) = Document::decode_text(encoding, bytes)
-            {
-                return decoded;
-            }
-        }
-        String::from_utf8_lossy(bytes).to_string()
-    }
-
-    #[must_use]
     pub(super) fn display_name(&self, font_key: Option<&[u8]>) -> Option<&str> {
         font_key
             .and_then(|key| self.fonts.get(key))
@@ -102,41 +95,152 @@ impl<'a> FontCatalog<'a> {
     }
 
     #[must_use]
-    pub(super) fn glyph_widths(
-        &self,
-        font_key: Option<&[u8]>,
-        bytes: &[u8],
-        fallback_len: usize,
-    ) -> Vec<f64> {
+    pub(super) fn glyph_runs(&self, font_key: Option<&[u8]>, bytes: &[u8]) -> Vec<GlyphRun> {
         if bytes.is_empty() {
             return Vec::new();
         }
 
         let Some(key) = font_key else {
-            return vec![DEFAULT_GLYPH_WIDTH_UNITS; fallback_len.max(1)];
+            return fallback_runs_from_bytes(bytes, DEFAULT_GLYPH_WIDTH_UNITS);
         };
         let Some(font) = self.fonts.get(key) else {
-            return vec![DEFAULT_GLYPH_WIDTH_UNITS; fallback_len.max(1)];
+            return fallback_runs_from_bytes(bytes, DEFAULT_GLYPH_WIDTH_UNITS);
         };
 
-        let widths = match &font.width_table {
-            WidthTable::OneByte(table) => bytes
-                .iter()
-                .map(|byte| table.width_for_code(u32::from(*byte)))
-                .collect(),
-            WidthTable::Cid(table) => decode_cids(bytes)
-                .iter()
-                .map(|cid| table.width_for_cid(*cid))
-                .collect(),
-            WidthTable::Fallback { default_width } => vec![*default_width; fallback_len.max(1)],
-        };
+        let code_units = decode_code_units_for_font(font, bytes);
+        if code_units.is_empty() {
+            return fallback_runs_from_bytes(bytes, DEFAULT_GLYPH_WIDTH_UNITS);
+        }
 
-        if widths.is_empty() {
-            vec![DEFAULT_GLYPH_WIDTH_UNITS; fallback_len.max(1)]
+        let mut runs = Vec::with_capacity(code_units.len());
+        for unit in code_units {
+            let mut text = decode_unit_text(font.encoding.as_ref(), &unit);
+            if text.is_empty() {
+                text = String::from_utf8_lossy(&unit).to_string();
+            }
+
+            let width_units = match &font.width_table {
+                WidthTable::OneByte(table) => table.width_for_code(u32::from(unit[0])),
+                WidthTable::Cid(table) => table.width_for_cid(code_unit_to_u32(&unit)),
+                WidthTable::Fallback { default_width } => *default_width,
+            };
+
+            runs.push(GlyphRun { text, width_units });
+        }
+
+        if runs.is_empty() {
+            fallback_runs_from_bytes(bytes, DEFAULT_GLYPH_WIDTH_UNITS)
         } else {
-            widths
+            runs
         }
     }
+}
+
+fn decode_unit_text(encoding: Option<&Encoding<'_>>, unit: &[u8]) -> String {
+    if let Some(encoding) = encoding
+        && let Ok(text) = Document::decode_text(encoding, unit)
+    {
+        return text;
+    }
+    String::new()
+}
+
+fn fallback_runs_from_bytes(bytes: &[u8], width_units: f64) -> Vec<GlyphRun> {
+    bytes
+        .iter()
+        .map(|byte| GlyphRun {
+            text: String::from_utf8_lossy(&[*byte]).to_string(),
+            width_units,
+        })
+        .collect()
+}
+
+fn decode_code_units_for_font(font: &FontRuntime<'_>, bytes: &[u8]) -> Vec<Vec<u8>> {
+    match &font.width_table {
+        WidthTable::OneByte(_) => bytes.iter().map(|byte| vec![*byte]).collect(),
+        WidthTable::Cid(_) => decode_cid_code_units(bytes, font.encoding.as_ref()),
+        WidthTable::Fallback { .. } => decode_variable_code_units(bytes, font.encoding.as_ref(), 1),
+    }
+}
+
+fn decode_cid_code_units(bytes: &[u8], encoding: Option<&Encoding<'_>>) -> Vec<Vec<u8>> {
+    let variable_units = decode_variable_code_units(bytes, encoding, 2);
+    if variable_units.is_empty() {
+        return Vec::new();
+    }
+
+    let mut normalized = Vec::new();
+    for unit in variable_units {
+        if unit.len() <= 2 {
+            normalized.push(unit);
+            continue;
+        }
+
+        let mut chunks = unit.chunks_exact(2);
+        for chunk in &mut chunks {
+            normalized.push(chunk.to_vec());
+        }
+        let remainder = chunks.remainder();
+        if !remainder.is_empty() {
+            normalized.push(remainder.to_vec());
+        }
+    }
+    normalized
+}
+
+fn decode_variable_code_units(
+    bytes: &[u8],
+    encoding: Option<&Encoding<'_>>,
+    fallback_unit: usize,
+) -> Vec<Vec<u8>> {
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(encoding) = encoding else {
+        return bytes
+            .chunks(fallback_unit.max(1))
+            .map(<[u8]>::to_vec)
+            .collect();
+    };
+
+    let mut units = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let remaining = bytes.len().saturating_sub(cursor);
+        let max_len = remaining.min(4);
+        let mut selected: Option<Vec<u8>> = None;
+
+        for width in (1..=max_len).rev() {
+            let candidate = &bytes[cursor..cursor + width];
+            let decoded = Document::decode_text(encoding, candidate);
+            let Ok(text) = decoded else {
+                continue;
+            };
+            if text.is_empty() || text.chars().any(|character| character == '\u{FFFD}') {
+                continue;
+            }
+            selected = Some(candidate.to_vec());
+            break;
+        }
+
+        if let Some(unit) = selected {
+            cursor = cursor.saturating_add(unit.len());
+            units.push(unit);
+        } else {
+            let width = fallback_unit.min(remaining).max(1);
+            let unit = bytes[cursor..cursor + width].to_vec();
+            cursor = cursor.saturating_add(unit.len());
+            units.push(unit);
+        }
+    }
+
+    units
+}
+
+fn code_unit_to_u32(unit: &[u8]) -> u32 {
+    unit.iter()
+        .fold(0_u32, |acc, byte| (acc << 8) | u32::from(*byte))
 }
 
 impl OneByteWidthTable {
@@ -281,6 +385,7 @@ fn missing_width(document: &Document, font_dict: &Dictionary) -> Option<f64> {
         .and_then(object_to_f64)
 }
 
+#[cfg(test)]
 fn decode_cids(bytes: &[u8]) -> Vec<u32> {
     let mut cids = Vec::new();
     let mut chunks = bytes.chunks_exact(2);

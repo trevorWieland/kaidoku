@@ -2,7 +2,8 @@ use super::matrix::Matrix;
 use super::resources::ResourceScope;
 use super::state::{GraphicsState, TextState};
 use super::{
-    EmitContext, OperationCursor, ProcessRuntime, object_to_f64, process_stream, resources, text,
+    EmitContext, ExtractionStage, OperationCursor, ProcessRuntime, object_to_f64, process_stream,
+    resources, text,
 };
 use crate::{BBox, ExtractError, ImagePayload};
 use lopdf::{Object, Stream, content::Operation};
@@ -140,9 +141,10 @@ fn handle_xobject_invocation(
         return Ok(());
     }
 
-    runtime
-        .control
-        .checkpoint("form_xobject_enter", Some(context.page_number()))?;
+    runtime.control.checkpoint(
+        ExtractionStage::FormXObjectEnter,
+        Some(context.page_number()),
+    )?;
     runtime.traversal.enter(object_id)?;
     let child_scope = resources::form_resource_scope(
         runtime.document,

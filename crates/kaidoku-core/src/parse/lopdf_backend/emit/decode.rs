@@ -1,9 +1,9 @@
-use super::ExtractionControl;
+use super::{ExtractionControl, ExtractionStage};
 use crate::{ExtractError, PageNumber};
 use flate2::read::{DeflateDecoder, ZlibDecoder};
 use lopdf::{Object, Stream};
-use std::io::{self, Read, Write};
-use weezl::{BitOrder, decode::Decoder as LzwDecoder};
+use std::io::Read;
+use weezl::{BitOrder, LzwStatus, decode::Decoder as LzwDecoder};
 
 pub(crate) fn decode_content_stream_bounded(
     stream: &Stream,
@@ -12,7 +12,7 @@ pub(crate) fn decode_content_stream_bounded(
     stream_byte_limit: usize,
     control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
-    control.checkpoint("decode_content_stream_start", Some(page_number))?;
+    control.checkpoint(ExtractionStage::DecodeContentStreamStart, Some(page_number))?;
 
     let filters = if stream.dict.get(b"Filter").is_ok() {
         stream
@@ -40,7 +40,10 @@ pub(crate) fn decode_content_stream_bounded(
     let mut current = stream.content.clone();
 
     for (index, filter) in filters.iter().enumerate() {
-        control.checkpoint("decode_content_stream_filter", Some(page_number))?;
+        control.checkpoint(
+            ExtractionStage::DecodeContentStreamFilter,
+            Some(page_number),
+        )?;
 
         let params = decode_params.and_then(|value| decode_params_for_filter(value, index));
         current = decode_filter_bounded(
@@ -133,7 +136,7 @@ fn decode_zlib_bounded(
         limit,
         page_number,
         stream_index,
-        "decode_zlib",
+        ExtractionStage::DecodeZlibChunk,
         control,
     ) {
         Ok(output) => Ok(output),
@@ -144,7 +147,7 @@ fn decode_zlib_bounded(
                 limit,
                 page_number,
                 stream_index,
-                "decode_deflate_fallback",
+                ExtractionStage::DecodeDeflateFallbackChunk,
                 control,
             )
             .map_err(|_| zlib_error)
@@ -161,7 +164,7 @@ fn decode_lzw_bounded(
     control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
     const MIN_BITS: u8 = 9;
-    control.checkpoint("decode_lzw", Some(page_number))?;
+    control.checkpoint(ExtractionStage::DecodeLzwChunk, Some(page_number))?;
 
     let early_change = params
         .and_then(|dict| dict.get(b"EarlyChange").ok())
@@ -174,25 +177,48 @@ fn decode_lzw_bounded(
         LzwDecoder::new(BitOrder::Msb, MIN_BITS - 1)
     };
 
-    let mut writer = LimitedWriter::new(limit);
-    let result = decoder.into_stream(&mut writer).decode_all(input);
+    let mut remaining = input;
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
 
-    if writer.overflowed() {
-        return Err(ExtractError::ContentStreamDecodeLimitExceeded {
-            page_number: page_number.get(),
-            stream_index,
-            limit_bytes: limit,
-            actual_bytes: writer.attempted_len(),
-        });
+    loop {
+        control.checkpoint(ExtractionStage::DecodeLzwChunk, Some(page_number))?;
+        let result = decoder.decode_bytes(remaining, &mut chunk);
+        remaining = remaining.get(result.consumed_in..).unwrap_or_default();
+
+        if result.consumed_out > 0 {
+            push_with_limit(
+                &mut output,
+                &chunk[..result.consumed_out],
+                limit,
+                page_number,
+                stream_index,
+            )?;
+        }
+
+        match result.status {
+            Ok(LzwStatus::Done) => break,
+            Ok(LzwStatus::Ok) => {}
+            Ok(LzwStatus::NoProgress) => {
+                return Err(ExtractError::ContentDecode {
+                    reason: "LZW stream ended before explicit end marker".to_string(),
+                });
+            }
+            Err(error) => {
+                return Err(ExtractError::ContentDecode {
+                    reason: error.to_string(),
+                });
+            }
+        }
+
+        if result.consumed_in == 0 && result.consumed_out == 0 {
+            return Err(ExtractError::ContentDecode {
+                reason: "LZW decoder made no progress".to_string(),
+            });
+        }
     }
 
-    if let Err(error) = result.status {
-        return Err(ExtractError::ContentDecode {
-            reason: error.to_string(),
-        });
-    }
-
-    Ok(writer.into_inner())
+    Ok(output)
 }
 
 fn decode_ascii85_bounded(
@@ -213,7 +239,7 @@ fn decode_ascii85_bounded(
     };
 
     for &character in input_no_eod {
-        control.checkpoint("decode_ascii85", Some(page_number))?;
+        control.checkpoint(ExtractionStage::DecodeAscii85, Some(page_number))?;
 
         if character == b'z' {
             if count != 0 {
@@ -290,7 +316,7 @@ fn decode_ascii_hex_bounded(
     let mut upper_nibble: Option<u8> = None;
 
     for &byte in input {
-        control.checkpoint("decode_ascii_hex", Some(page_number))?;
+        control.checkpoint(ExtractionStage::DecodeAsciiHex, Some(page_number))?;
 
         if byte == b'>' {
             break;
@@ -334,7 +360,7 @@ fn decode_run_length_bounded(
     let mut cursor = 0usize;
 
     while cursor < input.len() {
-        control.checkpoint("decode_run_length", Some(page_number))?;
+        control.checkpoint(ExtractionStage::DecodeRunLength, Some(page_number))?;
 
         let length_byte = input[cursor];
         cursor = cursor.saturating_add(1);
@@ -402,7 +428,7 @@ fn read_to_limit<R: Read>(
     limit: usize,
     page_number: PageNumber,
     stream_index: u32,
-    checkpoint_stage: &'static str,
+    checkpoint_stage: ExtractionStage,
     control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
     let mut output = Vec::new();
@@ -435,54 +461,6 @@ fn read_to_limit<R: Read>(
     }
 
     Ok(output)
-}
-
-#[derive(Debug)]
-struct LimitedWriter {
-    limit: usize,
-    attempted_len: usize,
-    overflowed: bool,
-    output: Vec<u8>,
-}
-
-impl LimitedWriter {
-    fn new(limit: usize) -> Self {
-        Self {
-            limit,
-            attempted_len: 0,
-            overflowed: false,
-            output: Vec::new(),
-        }
-    }
-
-    const fn overflowed(&self) -> bool {
-        self.overflowed
-    }
-
-    const fn attempted_len(&self) -> usize {
-        self.attempted_len
-    }
-
-    fn into_inner(self) -> Vec<u8> {
-        self.output
-    }
-}
-
-impl Write for LimitedWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.attempted_len = self.output.len().saturating_add(buf.len());
-        if self.attempted_len > self.limit {
-            self.overflowed = true;
-            return Err(io::Error::other("decoded stream exceeded configured limit"));
-        }
-
-        self.output.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

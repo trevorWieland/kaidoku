@@ -19,7 +19,7 @@ fn source_ref_stable_key_is_deterministic() {
     assert!(source_ref.is_ok());
 
     let Ok(source_ref) = source_ref else { return };
-    assert_eq!(source_ref.stable_key(), "p1-o9-s0-i3");
+    assert_eq!(source_ref.stable_key(), "p1-po12g0-o9-s0-i3");
 }
 
 #[test]

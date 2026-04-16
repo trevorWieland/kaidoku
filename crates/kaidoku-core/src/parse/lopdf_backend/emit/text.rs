@@ -51,39 +51,44 @@ pub(super) fn emit_text_elements(
         _ => return Ok(()),
     };
 
-    let decoded_text = context
+    let glyph_runs = context
         .font_catalog
-        .decode_text(text_state.font_key(), raw_bytes);
+        .glyph_runs(text_state.font_key(), raw_bytes);
+    if glyph_runs.is_empty() {
+        return Ok(());
+    }
+    let decoded_text = glyph_runs
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>();
     if decoded_text.is_empty() {
         return Ok(());
     }
-
-    let char_count = decoded_text.chars().count();
+    let char_count = glyph_runs
+        .iter()
+        .map(|run| run.text.chars().count())
+        .sum::<usize>();
     if char_count == 0 {
         return Ok(());
     }
-
-    let mut width_units =
-        context
-            .font_catalog
-            .glyph_widths(text_state.font_key(), raw_bytes, char_count);
-    width_units = align_widths_with_char_count(width_units, char_count);
 
     let font_id = context.intern_font_id(text_state.font_key())?;
 
     let mut probe_state = text_state.clone();
     let mut span_bbox: Option<BBox> = None;
-    for (idx, character) in decoded_text.chars().enumerate() {
-        let glyph_width_units = width_units.get(idx).copied().unwrap_or(500.0).max(0.0);
-        let (glyph_advance, total_advance) = advances(&probe_state, character, glyph_width_units);
+    for run in &glyph_runs {
+        let advances =
+            glyph_char_advances(&probe_state, run.text.as_str(), run.width_units.max(0.0));
+        for (character, glyph_advance, total_advance) in advances {
+            let char_bbox = char_bbox_for_state(&probe_state, graphics_state, glyph_advance)?;
+            span_bbox = Some(match span_bbox {
+                None => char_bbox,
+                Some(previous) => merge_bbox(previous, char_bbox)?,
+            });
 
-        let char_bbox = char_bbox_for_state(&probe_state, graphics_state, glyph_advance)?;
-        span_bbox = Some(match span_bbox {
-            None => char_bbox,
-            Some(previous) => merge_bbox(previous, char_bbox)?,
-        });
-
-        probe_state.advance_text(total_advance);
+            let _ = character;
+            probe_state.advance_text(total_advance);
+        }
     }
 
     let span_bbox = if let Some(span_bbox) = span_bbox {
@@ -110,49 +115,82 @@ pub(super) fn emit_text_elements(
         },
     )?;
 
-    for (idx, character) in decoded_text.chars().enumerate() {
-        let idx_u32 = u32::try_from(idx).map_err(|_| ExtractError::InvariantViolation {
-            reason: "character index overflow".to_string(),
-        })?;
+    let mut char_index: u32 = 0;
+    for run in glyph_runs {
+        for (character, glyph_advance, total_advance) in
+            glyph_char_advances(text_state, run.text.as_str(), run.width_units.max(0.0))
+        {
+            let char_bbox = char_bbox_for_state(text_state, graphics_state, glyph_advance)?;
 
-        let glyph_width_units = width_units.get(idx).copied().unwrap_or(500.0).max(0.0);
-        let (glyph_advance, total_advance) = advances(text_state, character, glyph_width_units);
+            let char_element_index = cursor.next_element_index()?;
+            context.push_char(
+                operation_index,
+                char_element_index,
+                char_bbox,
+                CharPayload {
+                    text: character.to_string(),
+                    font_id,
+                    font_size: text_state.font_size(),
+                    char_index,
+                },
+            )?;
 
-        let char_bbox = char_bbox_for_state(text_state, graphics_state, glyph_advance)?;
-
-        let char_element_index = cursor.next_element_index()?;
-        context.push_char(
-            operation_index,
-            char_element_index,
-            char_bbox,
-            CharPayload {
-                text: character.to_string(),
-                font_id,
-                font_size: text_state.font_size(),
-                char_index: idx_u32,
-            },
-        )?;
-
-        text_state.advance_text(total_advance);
+            char_index = char_index
+                .checked_add(1)
+                .ok_or(ExtractError::InvariantViolation {
+                    reason: "character index overflow".to_string(),
+                })?;
+            text_state.advance_text(total_advance);
+        }
     }
 
     Ok(())
 }
 
-fn advances(text_state: &TextState, character: char, glyph_width_units: f64) -> (f64, f64) {
+fn glyph_char_advances(
+    text_state: &TextState,
+    glyph_text: &str,
+    glyph_width_units: f64,
+) -> Vec<(char, f64, f64)> {
+    let chars = glyph_text.chars().collect::<Vec<char>>();
+    if chars.is_empty() {
+        return Vec::new();
+    }
+
     let glyph_advance = (glyph_width_units / 1000.0)
         * text_state.font_size()
         * text_state.horizontal_scale_factor();
-    let spacing_advance = (text_state.char_spacing()
-        + if character == ' ' {
+    let spacing_advance = glyph_spacing_advance(text_state, &chars);
+    let chars_len = chars.len();
+    let per_char_advance = if chars_len == 1 {
+        glyph_advance.max(0.0)
+    } else {
+        let chars_len_f64 = u32::try_from(chars_len).ok().map_or(1.0, f64::from);
+        (glyph_advance / chars_len_f64).max(0.0)
+    };
+
+    let mut out = Vec::with_capacity(chars_len);
+    for (index, character) in chars.into_iter().enumerate() {
+        let is_last = index + 1 == chars_len;
+        let total_advance = if is_last {
+            (per_char_advance + spacing_advance).max(0.0)
+        } else {
+            per_char_advance.max(0.0)
+        };
+        out.push((character, per_char_advance, total_advance));
+    }
+    out
+}
+
+fn glyph_spacing_advance(text_state: &TextState, glyph_chars: &[char]) -> f64 {
+    let is_space = glyph_chars.len() == 1 && glyph_chars[0] == ' ';
+    (text_state.char_spacing()
+        + if is_space {
             text_state.word_spacing()
         } else {
             0.0
         })
-        * text_state.horizontal_scale_factor();
-
-    let total_advance = (glyph_advance + spacing_advance).max(0.0);
-    (glyph_advance, total_advance)
+        * text_state.horizontal_scale_factor()
 }
 
 fn char_bbox_for_state(
@@ -184,32 +222,4 @@ fn merge_bbox(left: BBox, right: BBox) -> Result<BBox, ExtractError> {
     let max_y = (left.y() + left.height()).max(right.y() + right.height());
 
     BBox::new(min_x, min_y, max_x - min_x, max_y - min_y).map_err(ExtractError::from)
-}
-
-fn align_widths_with_char_count(mut widths: Vec<f64>, char_count: usize) -> Vec<f64> {
-    if char_count == 0 {
-        return Vec::new();
-    }
-
-    if widths.len() == char_count {
-        return widths;
-    }
-
-    if widths.is_empty() {
-        return vec![500.0; char_count];
-    }
-
-    let total = widths.iter().copied().sum::<f64>();
-    let char_count_f64 = u32::try_from(char_count).ok().map(f64::from);
-    let per_char = if total <= 0.0 {
-        500.0
-    } else if let Some(char_count_f64) = char_count_f64 {
-        total / char_count_f64
-    } else {
-        500.0
-    };
-
-    widths.clear();
-    widths.resize(char_count, per_char);
-    widths
 }

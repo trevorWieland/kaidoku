@@ -1,5 +1,6 @@
 use super::{
-    ExtractionControl, ExtractionLimits, FontRegistry, PageEmitConfig, extract_page_elements,
+    ExtractionControl, ExtractionLimits, FontRegistry, PageEmitConfig, content_parser,
+    extract_page_elements,
 };
 use crate::PageNumber;
 use crate::parse::lopdf_backend::resources::{page_geometry, page_resource_scope};
@@ -145,5 +146,25 @@ fn cumulative_decoded_stream_budget_is_enforced() {
     assert!(matches!(
         error,
         crate::ExtractError::DecodedStreamBudgetExceeded { .. }
+    ));
+}
+
+#[test]
+fn content_parse_honors_timeout_during_tokenization() {
+    let page_number = PageNumber::new(1).expect("page number");
+    let control = ExtractionControl::new(0, None);
+    let error = content_parser::parse_content_operations_bounded(
+        b"BT /F1 12 Tf (Hello) Tj ET",
+        page_number,
+        &control,
+    )
+    .expect_err("timeout should interrupt parse");
+
+    assert!(matches!(
+        error,
+        crate::ExtractError::ExtractionTimeoutExceeded {
+            stage: "content_parse_operation",
+            ..
+        }
     ));
 }
