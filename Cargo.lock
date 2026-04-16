@@ -798,6 +798,7 @@ dependencies = [
  "flate2",
  "lopdf",
  "pretty_assertions",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",

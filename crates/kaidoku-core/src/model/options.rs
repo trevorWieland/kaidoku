@@ -49,6 +49,10 @@ pub const fn default_max_wall_time_ms() -> u64 {
     30_000
 }
 
+pub const fn default_max_content_nesting_depth() -> usize {
+    128
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ExtractOptionsError {
     #[error("option `{name}` must be >= 1")]
@@ -101,6 +105,8 @@ pub struct ExtractOptions {
     max_form_xobject_depth: usize,
     max_form_xobject_visits: usize,
     max_wall_time_ms: u64,
+    max_content_nesting_depth: usize,
+    parallel_page_extraction: bool,
     cancellation_token: Option<CancellationToken>,
 }
 
@@ -176,6 +182,16 @@ impl ExtractOptions {
     }
 
     #[must_use]
+    pub fn max_content_nesting_depth(&self) -> usize {
+        self.max_content_nesting_depth
+    }
+
+    #[must_use]
+    pub fn parallel_page_extraction(&self) -> bool {
+        self.parallel_page_extraction
+    }
+
+    #[must_use]
     pub fn cancellation_token(&self) -> Option<CancellationToken> {
         self.cancellation_token.clone()
     }
@@ -216,6 +232,8 @@ pub struct ExtractOptionsBuilder {
     max_form_xobject_depth: usize,
     max_form_xobject_visits: usize,
     max_wall_time_ms: u64,
+    max_content_nesting_depth: usize,
+    parallel_page_extraction: bool,
     cancellation_token: Option<CancellationToken>,
 }
 
@@ -235,6 +253,8 @@ impl Default for ExtractOptionsBuilder {
             max_form_xobject_depth: default_max_form_xobject_depth(),
             max_form_xobject_visits: default_max_form_xobject_visits(),
             max_wall_time_ms: default_max_wall_time_ms(),
+            max_content_nesting_depth: default_max_content_nesting_depth(),
+            parallel_page_extraction: false,
             cancellation_token: None,
         }
     }
@@ -320,6 +340,18 @@ impl ExtractOptionsBuilder {
     }
 
     #[must_use]
+    pub fn max_content_nesting_depth(mut self, max_content_nesting_depth: usize) -> Self {
+        self.max_content_nesting_depth = max_content_nesting_depth;
+        self
+    }
+
+    #[must_use]
+    pub fn parallel_page_extraction(mut self, parallel_page_extraction: bool) -> Self {
+        self.parallel_page_extraction = parallel_page_extraction;
+        self
+    }
+
+    #[must_use]
     pub fn cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
         self.cancellation_token = Some(cancellation_token);
         self
@@ -354,6 +386,10 @@ impl ExtractOptionsBuilder {
             self.max_form_xobject_visits as u128,
         )?;
         validate_non_zero("max_wall_time_ms", u128::from(self.max_wall_time_ms))?;
+        validate_non_zero(
+            "max_content_nesting_depth",
+            self.max_content_nesting_depth as u128,
+        )?;
 
         if self.coordinate_precision > MAX_COORDINATE_PRECISION {
             return Err(ExtractOptionsError::InvalidCoordinatePrecision {
@@ -377,6 +413,8 @@ impl ExtractOptionsBuilder {
             max_form_xobject_depth: self.max_form_xobject_depth,
             max_form_xobject_visits: self.max_form_xobject_visits,
             max_wall_time_ms: self.max_wall_time_ms,
+            max_content_nesting_depth: self.max_content_nesting_depth,
+            parallel_page_extraction: self.parallel_page_extraction,
             cancellation_token: self.cancellation_token,
         })
     }

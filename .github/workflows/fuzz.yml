@@ -33,3 +33,7 @@ jobs:
       - name: Geometry normalization target
         working-directory: fuzz
         run: cargo fuzz run geometry_normalization -- -max_total_time=60
+
+      - name: Content parser target
+        working-directory: fuzz
+        run: cargo fuzz run content_parser -- -max_total_time=60

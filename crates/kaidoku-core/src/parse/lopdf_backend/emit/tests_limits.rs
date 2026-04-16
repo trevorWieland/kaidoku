@@ -68,6 +68,7 @@ fn compressed_stream_limit_is_enforced_during_decode() {
                 total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
+                max_content_nesting_depth: 128,
             },
             control: &control,
         },
@@ -135,6 +136,7 @@ fn cumulative_decoded_stream_budget_is_enforced() {
                 total_stream_budget: 200,
                 max_form_depth: 8,
                 max_form_visits: 128,
+                max_content_nesting_depth: 128,
             },
             control: &control,
         },
@@ -156,6 +158,7 @@ fn content_parse_honors_timeout_during_tokenization() {
     let error = content_parser::parse_content_operations_bounded(
         b"BT /F1 12 Tf (Hello) Tj ET",
         page_number,
+        128,
         &control,
     )
     .expect_err("timeout should interrupt parse");

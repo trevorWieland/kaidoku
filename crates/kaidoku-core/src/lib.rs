@@ -6,15 +6,15 @@ mod parse;
 pub use model::{
     BBox, BackendIdentifier, CancellationToken, CharPayload, ExtractOptions, ExtractOptionsError,
     ExtractionDocument, ExtractionPage, ExtractionSource, FontDescriptor, FontId, ImagePayload,
-    PageNumber, PageRange, PageRangeError, PageSelection, ParseBackend, RawElement,
-    SchemaIdentifier, Sha256Digest, SourceRef, SpanPayload, ValidationError,
-    default_max_content_stream_bytes, default_max_elements_per_page,
-    default_max_form_xobject_depth, default_max_form_xobject_visits, default_max_input_bytes,
-    default_max_operations_per_page, default_max_page_tree_depth, default_max_pages,
-    default_max_total_decoded_stream_bytes, default_max_wall_time_ms,
+    NonNegativeFinite, PageNumber, PageRange, PageRangeError, PageSelection, ParseBackend,
+    PositiveFinite, RawElement, SchemaIdentifier, Sha256Digest, SourceRef, SpanPayload,
+    ValidationError, default_max_content_nesting_depth, default_max_content_stream_bytes,
+    default_max_elements_per_page, default_max_form_xobject_depth, default_max_form_xobject_visits,
+    default_max_input_bytes, default_max_operations_per_page, default_max_page_tree_depth,
+    default_max_pages, default_max_total_decoded_stream_bytes, default_max_wall_time_ms,
 };
 
-use parse::extract_with_backend;
+use parse::{extract_first_page_with_backend, extract_with_backend};
 use serde_json::Error as JsonError;
 use thiserror::Error;
 
@@ -103,6 +103,12 @@ pub enum ExtractError {
         depth: usize,
         limit: usize,
     },
+    #[error("content stream nesting depth exceeded on page {page_number}: {depth} > {limit}")]
+    ContentNestingLimitExceeded {
+        page_number: u32,
+        depth: usize,
+        limit: usize,
+    },
     #[error(
         "form xobject cycle detected on page {page_number} at object {object_number}:{object_generation}"
     )]
@@ -152,11 +158,37 @@ pub fn extract_pdf(
     extract_with_backend(input_bytes, options)
 }
 
+/// Extract only the first page of the PDF without walking the full page tree.
+///
+/// This is a low-latency fast path for first-byte/first-page previews. It avoids
+/// gathering the complete page map, so scaling is dominated by the single
+/// first-page content stream rather than document size.
+///
+/// The returned [`ExtractionDocument`] contains exactly one page and is
+/// byte-identical (after canonical JSON serialization) to
+/// `extract_pdf(bytes, opts.page_selection(PageSelection::Range(PageRange::new(1,1)?)))`.
+pub fn extract_pdf_first_page(
+    input_bytes: &[u8],
+    options: ExtractOptions,
+) -> Result<ExtractionDocument, ExtractError> {
+    if input_bytes.len() > options.max_input_bytes() {
+        return Err(ExtractError::InputTooLarge {
+            limit_bytes: options.max_input_bytes(),
+            actual_bytes: input_bytes.len(),
+        });
+    }
+    extract_first_page_with_backend(input_bytes, options)
+}
+
 pub fn to_canonical_json(document: &ExtractionDocument) -> Result<String, ExtractError> {
     let mut json = serde_json::to_string_pretty(document)?;
     json.push('\n');
     Ok(json)
 }
 
+#[cfg(test)]
+mod phase1_parity_tests;
+#[cfg(test)]
+mod phase1_support;
 #[cfg(test)]
 mod phase1_tests;

@@ -19,6 +19,8 @@ use state::{GraphicsState, TextState};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[cfg(feature = "fuzzing")]
+pub(crate) use content_parser::parse_content_operations_bounded as content_parser_bounded_for_fuzz;
 pub(super) use control::FontRegistry;
 pub(crate) use control::{ExtractionControl, ExtractionStage};
 
@@ -60,6 +62,7 @@ pub(super) struct ExtractionLimits {
     pub(super) total_stream_budget: usize,
     pub(super) max_form_depth: usize,
     pub(super) max_form_visits: usize,
+    pub(super) max_content_nesting_depth: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -369,60 +372,53 @@ fn process_stream(
         .remaining_decoded_budget
         .saturating_sub(content_bytes.len());
 
-    let operations = content_parser::parse_content_operations_bounded(
-        &content_bytes,
-        emit.page_number(),
-        runtime.control,
-    )?;
-
     runtime.control.checkpoint(
         ExtractionStage::ProcessStreamParseOperation,
         Some(emit.page_number()),
     )?;
 
-    for (op_idx, operation) in operations.iter().enumerate() {
-        runtime.control.checkpoint(
-            ExtractionStage::ProcessStreamOperation,
-            Some(emit.page_number()),
-        )?;
+    let max_content_nesting_depth = runtime.limits.max_content_nesting_depth;
+    let operation_budget = runtime.limits.operation_budget;
+    let page_num = emit.page_number();
+    let control_ptr: &ExtractionControl = runtime.control;
+    let streaming_result = content_parser::parse_content_operations_streaming(
+        &content_bytes,
+        page_num,
+        max_content_nesting_depth,
+        control_ptr,
+        |operation, operation_index| {
+            control_ptr.checkpoint(ExtractionStage::ProcessStreamOperation, Some(page_num))?;
 
-        *runtime.total_operations =
-            runtime
-                .total_operations
-                .checked_add(1)
-                .ok_or(ExtractError::InvariantViolation {
+            *runtime.total_operations = runtime.total_operations.checked_add(1).ok_or(
+                ExtractError::InvariantViolation {
                     reason: "operation count overflow".to_string(),
-                })?;
+                },
+            )?;
 
-        if *runtime.total_operations > runtime.limits.operation_budget {
-            emit.stream_index = previous_stream_index;
-            return Err(ExtractError::ExtractionLimitExceeded {
-                page_number: emit.page_number.get(),
-                kind: "operations_per_page",
-                limit: u64::from(runtime.limits.operation_budget),
-                actual: u64::from(*runtime.total_operations),
-            });
-        }
+            if *runtime.total_operations > operation_budget {
+                return Err(ExtractError::ExtractionLimitExceeded {
+                    page_number: page_num.get(),
+                    kind: "operations_per_page",
+                    limit: u64::from(operation_budget),
+                    actual: u64::from(*runtime.total_operations),
+                });
+            }
 
-        let operation_index =
-            u32::try_from(op_idx).map_err(|_| ExtractError::InvariantViolation {
-                reason: "operation index overflow".to_string(),
-            })?;
-
-        let mut cursor = OperationCursor { next_index: 0 };
-        ops::process_operation(
-            operation,
-            operation_index,
-            text_state,
-            graphics_state,
-            &mut cursor,
-            emit,
-            (scope, runtime),
-        )?;
-    }
+            let mut cursor = OperationCursor { next_index: 0 };
+            ops::process_operation(
+                operation,
+                operation_index,
+                text_state,
+                graphics_state,
+                &mut cursor,
+                emit,
+                (scope, runtime),
+            )
+        },
+    );
 
     emit.stream_index = previous_stream_index;
-    Ok(())
+    streaming_result
 }
 
 fn allocate_stream_index(next_stream_index: &mut u32) -> Result<u32, ExtractError> {
@@ -434,6 +430,21 @@ fn allocate_stream_index(next_stream_index: &mut u32) -> Result<u32, ExtractErro
                 reason: "stream index overflow".to_string(),
             })?;
     Ok(current)
+}
+
+/// Pre-populate the font registry with every font display name on the given
+/// page, so subsequent `intern` calls always return a stable ID regardless of
+/// the order pages are processed. Used by the opt-in parallel extraction path.
+pub(super) fn prepopulate_font_registry(
+    document: &Document,
+    page_id: ObjectId,
+    font_registry: &mut FontRegistry,
+) -> Result<(), ExtractError> {
+    let catalog = FontCatalog::from_page(document, page_id)?;
+    for name in catalog.iter_display_names() {
+        font_registry.intern(name)?;
+    }
+    Ok(())
 }
 
 pub(super) fn object_to_f64(value: &Object) -> Result<f64, ExtractError> {

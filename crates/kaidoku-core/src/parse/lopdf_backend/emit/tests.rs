@@ -38,6 +38,7 @@ fn tj_elements_have_unique_source_ref_indices() {
                 total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
+                max_content_nesting_depth: 128,
             },
             control: &control,
         },
@@ -97,6 +98,7 @@ fn text_state_persists_across_stream_boundaries() {
                 total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
+                max_content_nesting_depth: 128,
             },
             control: &control,
         },
@@ -112,7 +114,7 @@ fn text_state_persists_across_stream_boundaries() {
     let span = elements.iter().find(|element| {
         element
             .span_payload()
-            .is_some_and(|payload| payload.text == "A")
+            .is_some_and(|payload| payload.text() == "A")
     });
     assert!(span.is_some());
     let Some(span) = span else { return };
@@ -126,8 +128,10 @@ fn text_state_persists_across_stream_boundaries() {
 
 #[test]
 fn inline_image_bi_emits_image_element() {
+    // Use declared /Length so the inline-image boundary is unambiguous: the
+    // 18-byte payload is consumed exactly, then `EI` follows unconditionally.
     let inline_content =
-        b"q 10 0 0 20 5 7 cm BI /W 2 /H 3 /CS /RGB /BPC 8 ID 123456789012345678 EI Q";
+        b"q 10 0 0 20 5 7 cm BI /W 2 /H 3 /CS /RGB /BPC 8 /Length 18 ID 123456789012345678 EI Q";
     let (document, page_id) = page_document_with_streams(&[inline_content]);
     let page_number = PageNumber::new(1).expect("page number");
 
@@ -152,6 +156,7 @@ fn inline_image_bi_emits_image_element() {
                 total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
+                max_content_nesting_depth: 128,
             },
             control: &control,
         },
@@ -262,6 +267,7 @@ fn form_xobject_recursion_emits_nested_image() {
                 total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
+                max_content_nesting_depth: 128,
             },
             control: &control,
         },
@@ -353,6 +359,7 @@ fn form_cycle_is_reported_as_structural_error() {
                 total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
+                max_content_nesting_depth: 128,
             },
             control: &control,
         },

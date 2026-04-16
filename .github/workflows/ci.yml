@@ -47,3 +47,21 @@ jobs:
 
       - name: Run canonical quality gate
         run: just ci
+
+  fuzz-smoke:
+    name: Fuzz Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: quality-gate
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: taiki-e/install-action@just
+      - uses: taiki-e/install-action@cargo-fuzz
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Phase 1 fuzz smoke (PR-blocking)
+        run: just phase1-fuzz-smoke-ci

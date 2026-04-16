@@ -108,11 +108,7 @@ pub(super) fn emit_text_elements(
         operation_index,
         span_element_index,
         span_bbox,
-        SpanPayload {
-            text: decoded_text.clone(),
-            font_id,
-            font_size: text_state.font_size(),
-        },
+        SpanPayload::new(decoded_text.clone(), font_id, text_state.font_size())?,
     )?;
 
     let mut char_index: u32 = 0;
@@ -127,12 +123,12 @@ pub(super) fn emit_text_elements(
                 operation_index,
                 char_element_index,
                 char_bbox,
-                CharPayload {
-                    text: character.to_string(),
+                CharPayload::new(
+                    character.to_string(),
                     font_id,
-                    font_size: text_state.font_size(),
+                    text_state.font_size(),
                     char_index,
-                },
+                )?,
             )?;
 
             char_index = char_index

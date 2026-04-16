@@ -147,11 +147,11 @@ Each deliverable should land as its own PR-sized unit with:
 
 At phase close, present:
 
-1. Demo command transcript from clean clone.
-2. Output JSON artifact(s) from fixture set.
-3. Golden diff test run output.
-4. Baseline performance report.
-5. Link to passing CI run (`Quality Gate`).
+1. Demo command transcript from clean clone — reproducible via `just phase1-demo-all`, which writes `target/phase1/demo/transcript.txt` capturing commit SHA, wall-clock, and each step's output.
+2. Output JSON artifact(s) from fixture set (`target/phase1/demo/*.json`).
+3. Golden diff test run output (included in the transcript).
+4. Baseline performance report (`target/phase1/benchmarks.current.json`).
+5. Link to passing CI run (`Quality Gate` plus the new `Fuzz Smoke` job).
 
 ## 7) Risks and Mitigations (Phase 1)
 

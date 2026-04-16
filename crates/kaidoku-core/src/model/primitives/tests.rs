@@ -1,7 +1,7 @@
 use super::{
-    BBox, BackendIdentifier, CharPayload, FontDescriptor, FontId, ImagePayload, RawElement,
-    SchemaIdentifier, Sha256Digest, SourceRef, SpanPayload, ValidationError,
+    BBox, BackendIdentifier, FontId, SchemaIdentifier, Sha256Digest, SourceRef, ValidationError,
 };
+use crate::{CharPayload, FontDescriptor, ImagePayload, RawElement, SpanPayload};
 use serde_json::from_str;
 
 #[test]
@@ -71,29 +71,14 @@ fn raw_element_variant_accessors_are_type_safe() {
     let Ok(source_ref) = source_ref else { return };
 
     let font_id = FontId::new(1).expect("font id");
-    let char_element = RawElement::char(
-        bbox,
-        source_ref,
-        CharPayload {
-            text: "A".to_string(),
-            font_id: Some(font_id),
-            font_size: 12.0,
-            char_index: 0,
-        },
-    );
+    let char_payload = CharPayload::new("A", Some(font_id), 12.0, 0).expect("char payload");
+    let char_element = RawElement::char(bbox, source_ref, char_payload);
     assert!(char_element.char_payload().is_some());
     assert!(char_element.span_payload().is_none());
     assert!(char_element.image_payload().is_none());
 
-    let span_element = RawElement::span(
-        bbox,
-        source_ref,
-        SpanPayload {
-            text: "AB".to_string(),
-            font_id: None,
-            font_size: 10.0,
-        },
-    );
+    let span_payload = SpanPayload::new("AB", None, 10.0).expect("span payload");
+    let span_element = RawElement::span(bbox, source_ref, span_payload);
     assert!(span_element.char_payload().is_none());
     assert!(span_element.span_payload().is_some());
     assert!(span_element.image_payload().is_none());

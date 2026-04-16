@@ -1,3 +1,8 @@
+use crate::phase1_support::{
+    REQUIRED_PHASE1_FIXTURES, bbox_contains, corpus_dir, golden_fixture_names, golden_path_for,
+    load_benchmark_baseline_fixture_names, load_manifest, phase1_fixture_names,
+    phase1_fixture_paths, required_fixture_set,
+};
 use crate::{
     CancellationToken, ExtractError, ExtractOptions, ParseBackend, extract_pdf, to_canonical_json,
 };
@@ -5,29 +10,7 @@ use pretty_assertions::assert_eq;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
-
-const REQUIRED_PHASE1_FIXTURES: [&str; 6] = [
-    "doclaynet_simple_text.pdf",
-    "doclaynet_multi_column.pdf",
-    "doclaynet_mixed_content.pdf",
-    "pdfjs_copy_paste_ligatures.pdf",
-    "pdfjs_arabic_cid_true_type.pdf",
-    "pdfjs_identity_to_unicode_map_char_code_of.pdf",
-];
-
-#[derive(Debug, serde::Deserialize)]
-struct ProvenanceManifest {
-    fixtures: Vec<ProvenanceFixture>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ProvenanceFixture {
-    name: String,
-    sha256: String,
-}
 
 #[test]
 fn golden_outputs_match_phase1_fixtures() {
@@ -206,7 +189,7 @@ fn source_refs_are_unique_per_operation() {
 
         for page in document.pages {
             let mut keys = BTreeSet::new();
-            for element in page.elements {
+            for element in page.elements() {
                 let source_ref = element.source_ref();
                 let key = (
                     source_ref.stream_index(),
@@ -216,7 +199,7 @@ fn source_refs_are_unique_per_operation() {
                 assert!(
                     keys.insert(key),
                     "duplicate source_ref within page {} in fixture {}",
-                    page.page_number.get(),
+                    page.page_number().get(),
                     fixture_path.display(),
                 );
             }
@@ -232,11 +215,11 @@ fn decoded_text_avoids_control_character_gibberish() {
             .expect("fixture extraction should succeed");
 
         for page in document.pages {
-            for element in page.elements {
+            for element in page.elements() {
                 let text = if let Some(span) = element.span_payload() {
-                    span.text.as_str()
+                    span.text()
                 } else if let Some(character) = element.char_payload() {
-                    character.text.as_str()
+                    character.text()
                 } else {
                     continue;
                 };
@@ -247,7 +230,7 @@ fn decoded_text_avoids_control_character_gibberish() {
                 assert!(
                     !has_bad_controls,
                     "decoded text contains control characters on page {} in {}: {:?}",
-                    page.page_number.get(),
+                    page.page_number().get(),
                     fixture_path.display(),
                     text,
                 );
@@ -265,10 +248,13 @@ fn span_bboxes_cover_char_bboxes_per_operation() {
 
         for page in document.pages {
             let mut grouped = BTreeMap::new();
-            for element in page.elements {
+            for element in page.elements() {
                 let source_ref = element.source_ref();
                 let key = (source_ref.stream_index(), source_ref.operation_index());
-                grouped.entry(key).or_insert_with(Vec::new).push(element);
+                grouped
+                    .entry(key)
+                    .or_insert_with(Vec::new)
+                    .push(element.clone());
             }
 
             for ((_stream, _operation), elements) in grouped {
@@ -292,7 +278,7 @@ fn span_bboxes_cover_char_bboxes_per_operation() {
                     assert!(
                         covered,
                         "char bbox was not covered by any span bbox on page {} in {}",
-                        page.page_number.get(),
+                        page.page_number().get(),
                         fixture_path.display(),
                     );
                 }
@@ -303,18 +289,39 @@ fn span_bboxes_cover_char_bboxes_per_operation() {
 
 #[test]
 fn bboxes_remain_within_page_bounds_with_tolerance() {
+    // Tight bound: production PDFs in the corpus have bboxes that sit inside
+    // a 1.5× page-dimension envelope. The historical 20× bound masked severe
+    // regressions (see Phase-1 audit P2). If a legitimate fixture exceeds this,
+    // introduce a per-element whitelist rather than relaxing the bound.
+    const MAX_DIM_MULTIPLIER: f64 = 1.5;
+
     for fixture_path in phase1_fixture_paths() {
         let bytes = fs::read(&fixture_path).expect("fixture must be readable");
         let document = extract_pdf(&bytes, ExtractOptions::default())
             .expect("fixture extraction should succeed");
 
         for page in document.pages {
-            for element in page.elements {
+            for element in page.elements() {
                 let bbox = element.bbox();
                 assert!(
-                    bbox.width() <= page.width * 20.0 && bbox.height() <= page.height * 20.0,
-                    "bbox dimensions are implausibly large on page {} in {}",
-                    page.page_number.get(),
+                    bbox.width().is_finite()
+                        && bbox.height().is_finite()
+                        && bbox.width() >= 0.0
+                        && bbox.height() >= 0.0,
+                    "bbox has non-finite or negative dimensions on page {} in {}: {:?}",
+                    page.page_number().get(),
+                    fixture_path.display(),
+                    bbox,
+                );
+                assert!(
+                    bbox.width() <= page.width() * MAX_DIM_MULTIPLIER
+                        && bbox.height() <= page.height() * MAX_DIM_MULTIPLIER,
+                    "bbox {:?} exceeds {}× page bounds ({} × {}) on page {} in {}",
+                    bbox,
+                    MAX_DIM_MULTIPLIER,
+                    page.width(),
+                    page.height(),
+                    page.page_number().get(),
                     fixture_path.display(),
                 );
             }
@@ -366,131 +373,4 @@ fn cooperative_cancellation_token_short_circuits_extraction() {
 
     let error = extract_pdf(&bytes, options).expect_err("cancelled extraction must fail");
     assert!(matches!(error, ExtractError::ExtractionCancelled { .. }));
-}
-
-fn required_fixture_set() -> BTreeSet<String> {
-    REQUIRED_PHASE1_FIXTURES
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect()
-}
-
-fn phase1_fixture_names() -> BTreeSet<String> {
-    phase1_fixture_paths()
-        .into_iter()
-        .filter_map(|path| path.file_name().and_then(OsStr::to_str).map(str::to_string))
-        .collect()
-}
-
-fn golden_fixture_names() -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    if let Ok(entries) = fs::read_dir(golden_dir()) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension() == Some(OsStr::new("json"))
-                && path.file_name() != Some(OsStr::new("benchmarks.baseline.json"))
-                && path.file_name() != Some(OsStr::new("benchmarks.current.json"))
-                && let Some(stem) = path.file_stem().and_then(OsStr::to_str)
-            {
-                names.insert(stem.to_string());
-            }
-        }
-    }
-
-    names
-}
-
-fn phase1_fixture_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
-    if let Ok(entries) = fs::read_dir(corpus_dir()) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension() == Some(OsStr::new("pdf")) {
-                paths.push(path);
-            }
-        }
-    }
-    paths.sort();
-    paths
-}
-
-fn load_manifest() -> ProvenanceManifest {
-    let manifest_path = corpus_dir().join("provenance.json");
-    let manifest_content =
-        fs::read_to_string(&manifest_path).expect("provenance manifest is readable");
-    serde_json::from_str(&manifest_content).expect("provenance manifest is valid json")
-}
-
-fn load_benchmark_baseline_fixture_names() -> BTreeSet<String> {
-    let baseline_path = golden_dir().join("benchmarks.baseline.json");
-    let content = fs::read_to_string(&baseline_path).expect("benchmark baseline is readable");
-    let value: serde_json::Value =
-        serde_json::from_str(&content).expect("benchmark baseline is valid json");
-
-    if let Some(reports) = value.get("reports").and_then(serde_json::Value::as_array) {
-        let mut names = BTreeSet::new();
-        for report in reports {
-            if let Some(fixtures) = report.get("fixtures").and_then(serde_json::Value::as_array) {
-                for fixture in fixtures {
-                    if let Some(name) = fixture.get("fixture").and_then(serde_json::Value::as_str) {
-                        names.insert(name.to_string());
-                    }
-                }
-            }
-        }
-        return names;
-    }
-
-    value
-        .get("fixtures")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|fixture| {
-            fixture
-                .get("fixture")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string)
-        })
-        .collect()
-}
-
-fn golden_path_for(fixture_path: &Path) -> PathBuf {
-    let stem = fixture_path
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .unwrap_or("unknown");
-    golden_dir().join(format!("{stem}.json"))
-}
-
-fn corpus_dir() -> PathBuf {
-    workspace_root().join("tests/corpus/phase1")
-}
-
-fn golden_dir() -> PathBuf {
-    workspace_root().join("tests/golden/phase1")
-}
-
-fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."))
-}
-
-fn bbox_contains(outer: crate::BBox, inner: crate::BBox, tolerance: f64) -> bool {
-    let outer_left = outer.x() - tolerance;
-    let outer_top = outer.y() - tolerance;
-    let outer_right = outer.x() + outer.width() + tolerance;
-    let outer_bottom = outer.y() + outer.height() + tolerance;
-
-    let inner_left = inner.x();
-    let inner_top = inner.y();
-    let inner_right = inner.x() + inner.width();
-    let inner_bottom = inner.y() + inner.height();
-
-    inner_left >= outer_left
-        && inner_top >= outer_top
-        && inner_right <= outer_right
-        && inner_bottom <= outer_bottom
 }

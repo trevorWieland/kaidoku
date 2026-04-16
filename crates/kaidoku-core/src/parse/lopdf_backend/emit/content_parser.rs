@@ -1,52 +1,86 @@
 use super::{ExtractionControl, ExtractionStage};
 use crate::{ExtractError, PageNumber};
-use lopdf::{Dictionary, Object, Stream, content::Operation};
+use lopdf::{Object, content::Operation};
 
-const TOKEN_CHECKPOINT_INTERVAL: usize = 256;
+pub(super) const TOKEN_CHECKPOINT_INTERVAL: usize = 256;
 
+#[path = "content_parser_inline_image.rs"]
+mod inline_image;
 #[path = "content_parser_object_impl.rs"]
 mod object_impl;
 
-pub(super) fn parse_content_operations_bounded(
+/// Parse a content stream, invoking `visit` for each operation as it is emitted.
+///
+/// This is the canonical streaming entrypoint — no intermediate `Vec<Operation>`
+/// is built. The callback receives each operation and its monotonic index; if
+/// the callback returns `Err`, parsing stops and the error propagates out.
+pub(super) fn parse_content_operations_streaming<F>(
     bytes: &[u8],
     page_number: PageNumber,
+    max_depth: usize,
     control: &ExtractionControl,
-) -> Result<Vec<Operation>, ExtractError> {
+    mut visit: F,
+) -> Result<(), ExtractError>
+where
+    F: FnMut(&Operation, u32) -> Result<(), ExtractError>,
+{
     let mut parser = ContentParser {
         bytes,
         cursor: 0,
         page_number,
+        max_depth,
         control,
         parse_steps: 0,
     };
-    parser.parse_all()
+    let mut op_index: u32 = 0;
+    loop {
+        parser
+            .control
+            .checkpoint(ExtractionStage::ContentParseOperation, Some(page_number))?;
+        parser.skip_ws_and_comments()?;
+        if parser.eof() {
+            break;
+        }
+        let operation = parser.parse_operation()?;
+        visit(&operation, op_index)?;
+        op_index = op_index
+            .checked_add(1)
+            .ok_or(ExtractError::InvariantViolation {
+                reason: "content stream operation index overflow".to_string(),
+            })?;
+    }
+    Ok(())
 }
 
-struct ContentParser<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
+/// Convenience helper: collect all operations into a `Vec`. Intended for tests
+/// and fuzz harnesses. Production code MUST prefer
+/// [`parse_content_operations_streaming`] so the extraction pipeline does not
+/// materialize an intermediate buffer.
+#[cfg(any(test, feature = "fuzzing"))]
+pub(crate) fn parse_content_operations_bounded(
+    bytes: &[u8],
     page_number: PageNumber,
-    control: &'a ExtractionControl,
-    parse_steps: usize,
+    max_depth: usize,
+    control: &ExtractionControl,
+) -> Result<Vec<Operation>, ExtractError> {
+    let mut operations = Vec::new();
+    parse_content_operations_streaming(bytes, page_number, max_depth, control, |op, _idx| {
+        operations.push(op.clone());
+        Ok(())
+    })?;
+    Ok(operations)
+}
+
+pub(super) struct ContentParser<'a> {
+    pub(super) bytes: &'a [u8],
+    pub(super) cursor: usize,
+    pub(super) page_number: PageNumber,
+    pub(super) max_depth: usize,
+    pub(super) control: &'a ExtractionControl,
+    pub(super) parse_steps: usize,
 }
 
 impl ContentParser<'_> {
-    fn parse_all(&mut self) -> Result<Vec<Operation>, ExtractError> {
-        let mut operations = Vec::new();
-        loop {
-            self.control.checkpoint(
-                ExtractionStage::ContentParseOperation,
-                Some(self.page_number),
-            )?;
-            self.skip_ws_and_comments()?;
-            if self.eof() {
-                break;
-            }
-            operations.push(self.parse_operation()?);
-        }
-        Ok(operations)
-    }
-
     fn parse_operation(&mut self) -> Result<Operation, ExtractError> {
         if self.starts_with_inline_image() {
             return self.parse_inline_image();
@@ -64,74 +98,41 @@ impl ContentParser<'_> {
             }
 
             let checkpoint = self.cursor;
-            if let Ok(object) = self.parse_object() {
-                operands.push(object);
-                self.skip_ws_and_comments()?;
-                if self.eof() {
-                    return self
-                        .content_error("unexpected end of stream while parsing operator token");
+            let object_result = self.parse_object();
+            match object_result {
+                Ok(object) => {
+                    operands.push(object);
+                    self.skip_ws_and_comments()?;
+                    if self.eof() {
+                        return self.content_error(
+                            "unexpected end of stream while parsing operator token",
+                        );
+                    }
+                    if is_operator_start(self.peek_byte().unwrap_or_default()) {
+                        let operator = self.parse_operator()?;
+                        return Ok(Operation { operator, operands });
+                    }
                 }
-                if is_operator_start(self.peek_byte().unwrap_or_default()) {
+                Err(err) => {
+                    // Structural errors — depth overflow, cooperative
+                    // control, invariant violations — must be propagated
+                    // directly. Otherwise an adversarial stream can hide a
+                    // depth overflow behind a spurious operator-parse error.
+                    if matches!(
+                        err,
+                        ExtractError::ContentNestingLimitExceeded { .. }
+                            | ExtractError::ExtractionTimeoutExceeded { .. }
+                            | ExtractError::ExtractionCancelled { .. }
+                            | ExtractError::InvariantViolation { .. }
+                    ) {
+                        return Err(err);
+                    }
+                    self.cursor = checkpoint;
                     let operator = self.parse_operator()?;
                     return Ok(Operation { operator, operands });
                 }
-            } else {
-                self.cursor = checkpoint;
-                let operator = self.parse_operator()?;
-                return Ok(Operation { operator, operands });
             }
         }
-    }
-
-    fn parse_inline_image(&mut self) -> Result<Operation, ExtractError> {
-        self.expect_inline_image_start()?;
-        self.skip_content_space()?;
-
-        let mut dict = Dictionary::new();
-        loop {
-            self.skip_ws_and_comments()?;
-            if self.match_keyword(b"ID") {
-                if let Some(byte) = self.peek_byte()
-                    && !is_content_space(byte)
-                {
-                    return self
-                        .content_error("inline image ID token must be followed by whitespace");
-                }
-                self.skip_content_space()?;
-                break;
-            }
-
-            let key = self.parse_name_bytes()?;
-            self.skip_ws_and_comments()?;
-            let value = self.parse_object()?;
-            dict.set(key, value);
-        }
-
-        let data_start = self.cursor;
-        let mut index = data_start;
-        while index.saturating_add(3) < self.bytes.len() {
-            self.parse_steps = self.parse_steps.saturating_add(1);
-            if self.parse_steps % TOKEN_CHECKPOINT_INTERVAL == 0 {
-                self.control
-                    .checkpoint(ExtractionStage::ContentParseToken, Some(self.page_number))?;
-            }
-            let start = self.bytes[index];
-            let e = self.bytes[index + 1];
-            let i = self.bytes[index + 2];
-            let end = self.bytes[index + 3];
-            if is_content_space(start) && e == b'E' && i == b'I' && is_content_space(end) {
-                let content = self.bytes[data_start..index].to_vec();
-                self.cursor = index + 3;
-                self.skip_content_space()?;
-                return Ok(Operation {
-                    operator: "BI".to_string(),
-                    operands: vec![Object::Stream(Stream::new(dict, content))],
-                });
-            }
-            index = index.saturating_add(1);
-        }
-
-        self.content_error("inline image data is missing EI terminator")
     }
 
     fn parse_operator(&mut self) -> Result<String, ExtractError> {
@@ -153,7 +154,18 @@ impl ContentParser<'_> {
         Ok(operator)
     }
 
-    fn parse_object(&mut self) -> Result<Object, ExtractError> {
+    pub(super) fn parse_object(&mut self) -> Result<Object, ExtractError> {
+        self.parse_object_at_depth(0)
+    }
+
+    pub(super) fn parse_object_at_depth(&mut self, depth: usize) -> Result<Object, ExtractError> {
+        if depth > self.max_depth {
+            return Err(ExtractError::ContentNestingLimitExceeded {
+                page_number: self.page_number.get(),
+                depth,
+                limit: self.max_depth,
+            });
+        }
         self.skip_ws_and_comments()?;
         let Some(byte) = self.peek_byte() else {
             return self.content_error("unexpected end of stream while parsing object");
@@ -162,10 +174,10 @@ impl ContentParser<'_> {
         match byte {
             b'/' => Ok(Object::Name(self.parse_name_bytes()?)),
             b'(' => self.parse_literal_string(),
-            b'[' => self.parse_array(),
+            b'[' => self.parse_array(depth),
             b'<' => {
                 if self.peek_byte_at(1) == Some(b'<') {
-                    self.parse_dictionary()
+                    self.parse_dictionary(depth)
                 } else {
                     self.parse_hex_string()
                 }
@@ -187,7 +199,7 @@ impl ContentParser<'_> {
         }
     }
 
-    fn skip_ws_and_comments(&mut self) -> Result<(), ExtractError> {
+    pub(super) fn skip_ws_and_comments(&mut self) -> Result<(), ExtractError> {
         loop {
             while let Some(byte) = self.peek_byte() {
                 if !is_whitespace(byte) {
@@ -207,7 +219,7 @@ impl ContentParser<'_> {
         Ok(())
     }
 
-    fn skip_content_space(&mut self) -> Result<(), ExtractError> {
+    pub(super) fn skip_content_space(&mut self) -> Result<(), ExtractError> {
         while let Some(byte) = self.peek_byte() {
             if !is_content_space(byte) {
                 break;
@@ -221,17 +233,7 @@ impl ContentParser<'_> {
         self.starts_with(b"BI") && self.peek_byte_at(2).is_some_and(is_content_space)
     }
 
-    fn expect_inline_image_start(&mut self) -> Result<(), ExtractError> {
-        if !self.starts_with_inline_image() {
-            return self.content_error("inline image operation is missing BI prefix");
-        }
-        self.cursor = self.cursor.saturating_add(2);
-        self.bump_parse_steps()?;
-        self.bump_parse_steps()?;
-        Ok(())
-    }
-
-    fn match_keyword(&mut self, keyword: &[u8]) -> bool {
+    pub(super) fn match_keyword(&mut self, keyword: &[u8]) -> bool {
         if !self.starts_with(keyword) {
             return false;
         }
@@ -246,7 +248,7 @@ impl ContentParser<'_> {
         true
     }
 
-    fn expect_keyword(&mut self, keyword: &[u8]) -> Result<(), ExtractError> {
+    pub(super) fn expect_keyword(&mut self, keyword: &[u8]) -> Result<(), ExtractError> {
         if self.match_keyword(keyword) {
             Ok(())
         } else {
@@ -254,7 +256,7 @@ impl ContentParser<'_> {
         }
     }
 
-    fn expect_byte(&mut self, expected: u8) -> Result<(), ExtractError> {
+    pub(super) fn expect_byte(&mut self, expected: u8) -> Result<(), ExtractError> {
         if self.peek_byte() == Some(expected) {
             self.cursor = self.cursor.saturating_add(1);
             self.bump_parse_steps()?;
@@ -264,7 +266,7 @@ impl ContentParser<'_> {
         }
     }
 
-    fn bump(&mut self) -> Result<u8, ExtractError> {
+    pub(super) fn bump(&mut self) -> Result<u8, ExtractError> {
         let Some(byte) = self.peek_byte() else {
             return self.content_error("unexpected end of content stream");
         };
@@ -273,14 +275,14 @@ impl ContentParser<'_> {
         Ok(byte)
     }
 
-    fn bump_if_available(&mut self) -> Result<Option<u8>, ExtractError> {
+    pub(super) fn bump_if_available(&mut self) -> Result<Option<u8>, ExtractError> {
         if self.eof() {
             return Ok(None);
         }
         Ok(Some(self.bump()?))
     }
 
-    fn bump_parse_steps(&mut self) -> Result<(), ExtractError> {
+    pub(super) fn bump_parse_steps(&mut self) -> Result<(), ExtractError> {
         self.parse_steps = self.parse_steps.saturating_add(1);
         if self.parse_steps % TOKEN_CHECKPOINT_INTERVAL == 0 {
             self.control
@@ -289,40 +291,44 @@ impl ContentParser<'_> {
         Ok(())
     }
 
-    fn starts_with(&self, expected: &[u8]) -> bool {
+    pub(super) fn starts_with(&self, expected: &[u8]) -> bool {
         self.bytes
             .get(self.cursor..self.cursor.saturating_add(expected.len()))
             == Some(expected)
     }
 
-    fn peek_byte(&self) -> Option<u8> {
+    pub(super) fn peek_byte(&self) -> Option<u8> {
         self.bytes.get(self.cursor).copied()
     }
 
-    fn peek_byte_at(&self, offset: usize) -> Option<u8> {
+    pub(super) fn peek_byte_at(&self, offset: usize) -> Option<u8> {
         self.bytes.get(self.cursor.saturating_add(offset)).copied()
     }
 
-    fn eof(&self) -> bool {
+    pub(super) fn eof(&self) -> bool {
         self.cursor >= self.bytes.len()
     }
 
-    fn content_error<T>(&self, message: &str) -> Result<T, ExtractError> {
+    pub(super) fn content_error<T>(&self, message: &str) -> Result<T, ExtractError> {
         Err(ExtractError::ContentDecode {
             reason: format!("{message} at byte offset {}", self.cursor),
         })
     }
 }
 
-fn is_whitespace(byte: u8) -> bool {
+pub(super) fn is_whitespace(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0c | 0x00)
 }
 
-fn is_content_space(byte: u8) -> bool {
+pub(super) fn is_content_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 
-fn is_delimiter(byte: u8) -> bool {
+pub(super) fn is_eol(byte: u8) -> bool {
+    byte == b'\n' || byte == b'\r'
+}
+
+pub(super) fn is_delimiter(byte: u8) -> bool {
     matches!(
         byte,
         b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%'
@@ -333,7 +339,7 @@ fn is_operator_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || matches!(byte, b'*' | b'\'' | b'"')
 }
 
-fn hex_nibble(byte: u8) -> Option<u8> {
+pub(super) fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),

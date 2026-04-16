@@ -149,6 +149,42 @@ phase1-fuzz-smoke:
     @cd fuzz && cargo +nightly fuzz run decode_filters -- -max_total_time=20
     @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=20
     @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=20
+    @cd fuzz && cargo +nightly fuzz run content_parser -- -max_total_time=20
+
+# PR-blocking fuzz-smoke invoked from .github/workflows/ci.yml — a slightly
+# longer run than the local 20 s smoke so transient regressions surface before
+# merge. Still capped short enough (~2 min total) not to dominate CI time.
+phase1-fuzz-smoke-ci:
+    @cd fuzz && cargo +nightly fuzz run decode_filters -- -max_total_time=30
+    @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=30
+    @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=30
+    @cd fuzz && cargo +nightly fuzz run content_parser -- -max_total_time=30
+
+# Single orchestrated Phase-1 demo: produces artifacts, verifies goldens,
+# checks benchmarks against baseline, runs a short fuzz smoke, and writes a
+# transcript capturing commit SHA + wall-clock so reviewers can reproduce.
+phase1-demo-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p target/phase1/demo
+    TRANSCRIPT=target/phase1/demo/transcript.txt
+    {
+        echo "kaidoku Phase-1 orchestrated demo"
+        echo "commit: $(git rev-parse HEAD 2>/dev/null || echo unknown)"
+        echo "started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo
+    } >"$TRANSCRIPT"
+    echo "==> Step 1/5: extract Phase-1 fixture corpus" | tee -a "$TRANSCRIPT"
+    just phase1-demo 2>&1 | tee -a "$TRANSCRIPT"
+    echo "==> Step 2/5: verify goldens, determinism, geometry, EI/depth invariants" | tee -a "$TRANSCRIPT"
+    {{ cargo }} nextest run -p kaidoku-core --profile ci --no-tests=pass 2>&1 | tee -a "$TRANSCRIPT"
+    echo "==> Step 3/5: check benchmarks against baseline" | tee -a "$TRANSCRIPT"
+    {{ cargo }} run --release -p kaidoku-cli -- bench phase1 --iterations 15 --warmup-iterations 4 --check --fixtures tests/corpus/phase1 --baseline tests/golden/phase1/benchmarks.baseline.json --output target/phase1/benchmarks.current.json 2>&1 | tee -a "$TRANSCRIPT"
+    echo "==> Step 4/5: short fuzz smoke (4 targets, 20s each)" | tee -a "$TRANSCRIPT"
+    just phase1-fuzz-smoke 2>&1 | tee -a "$TRANSCRIPT"
+    echo "==> Step 5/5: ok" | tee -a "$TRANSCRIPT"
+    echo "finished: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$TRANSCRIPT"
+    echo "transcript: $TRANSCRIPT"
 
 coverage:
     @{{ cargo }} llvm-cov nextest -p kaidoku-core --profile ci --lcov --output-path lcov.info --fail-under-lines 80 --no-tests=pass

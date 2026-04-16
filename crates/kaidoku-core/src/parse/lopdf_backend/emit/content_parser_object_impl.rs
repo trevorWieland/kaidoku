@@ -91,7 +91,7 @@ impl ContentParser<'_> {
         self.content_error("unterminated literal string")
     }
 
-    pub(super) fn parse_array(&mut self) -> Result<Object, ExtractError> {
+    pub(super) fn parse_array(&mut self, depth: usize) -> Result<Object, ExtractError> {
         self.expect_byte(b'[')?;
         let mut values = Vec::new();
         loop {
@@ -100,11 +100,11 @@ impl ContentParser<'_> {
                 self.bump()?;
                 return Ok(Object::Array(values));
             }
-            values.push(self.parse_object()?);
+            values.push(self.parse_object_at_depth(depth.saturating_add(1))?);
         }
     }
 
-    pub(super) fn parse_dictionary(&mut self) -> Result<Object, ExtractError> {
+    pub(super) fn parse_dictionary(&mut self, depth: usize) -> Result<Object, ExtractError> {
         self.expect_byte(b'<')?;
         self.expect_byte(b'<')?;
         let mut dict = Dictionary::new();
@@ -119,7 +119,7 @@ impl ContentParser<'_> {
 
             let key = self.parse_name_bytes()?;
             self.skip_ws_and_comments()?;
-            let value = self.parse_object()?;
+            let value = self.parse_object_at_depth(depth.saturating_add(1))?;
             dict.set(key, value);
         }
     }

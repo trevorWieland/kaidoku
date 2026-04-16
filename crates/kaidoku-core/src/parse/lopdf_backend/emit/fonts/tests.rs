@@ -11,13 +11,26 @@ fn simple_width_table_and_catalog_widths_work() {
         "FirstChar" => 32,
         "Widths" => vec![200.into(), 300.into(), 400.into()],
     };
-    let table = simple_width_table(&font_dict);
+    let table = simple_width_table(&font_dict, None);
     assert!(table.is_some());
     let Some(table) = table else { return };
 
     assert!((table.width_for_code(32) - 200.0).abs() < f64::EPSILON);
     assert!((table.width_for_code(34) - 400.0).abs() < f64::EPSILON);
     assert!((table.width_for_code(10) - 500.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn simple_width_table_uses_missing_width_for_fallback() {
+    let font_dict = dictionary! {
+        "FirstChar" => 32,
+        "Widths" => vec![200.into()],
+    };
+    let table = simple_width_table(&font_dict, Some(750.0)).expect("table");
+    // Codes inside range use the table; codes outside should use MissingWidth.
+    assert!((table.width_for_code(32) - 200.0).abs() < f64::EPSILON);
+    assert!((table.width_for_code(200) - 750.0).abs() < f64::EPSILON);
+    assert!((table.width_for_code(10) - 750.0).abs() < f64::EPSILON);
 }
 
 #[test]
@@ -41,7 +54,7 @@ fn cid_width_table_parses_ranges_and_sequences() {
     let font_dict = dictionary! {
         "DescendantFonts" => vec![Object::Reference(descendant_id)],
     };
-    let table = cid_width_table(&document, &font_dict);
+    let table = cid_width_table(&document, &font_dict, None);
     assert!(table.is_some());
     let Some(table) = table else { return };
 
@@ -49,6 +62,36 @@ fn cid_width_table_parses_ranges_and_sequences() {
     assert!((table.width_for_cid(17) - 510.0).abs() < f64::EPSILON);
     assert!((table.width_for_cid(21) - 700.0).abs() < f64::EPSILON);
     assert!((table.width_for_cid(40) - 900.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn cid_width_table_prefers_dw_then_missing_width() {
+    // /DW takes precedence even if MissingWidth is present.
+    let mut document = Document::new();
+    let descendant_id: ObjectId = (12, 0);
+    document.objects.insert(
+        descendant_id,
+        Object::Dictionary(dictionary! {
+            "DW" => 900,
+        }),
+    );
+    let font_dict = dictionary! {
+        "DescendantFonts" => vec![Object::Reference(descendant_id)],
+    };
+    let table = cid_width_table(&document, &font_dict, Some(600.0)).expect("table");
+    assert!((table.width_for_cid(999) - 900.0).abs() < f64::EPSILON);
+
+    // When /DW is absent, MissingWidth wins.
+    let mut document = Document::new();
+    let descendant_id: ObjectId = (13, 0);
+    document
+        .objects
+        .insert(descendant_id, Object::Dictionary(dictionary! {}));
+    let font_dict = dictionary! {
+        "DescendantFonts" => vec![Object::Reference(descendant_id)],
+    };
+    let table = cid_width_table(&document, &font_dict, Some(600.0)).expect("table");
+    assert!((table.width_for_cid(999) - 600.0).abs() < f64::EPSILON);
 }
 
 #[test]

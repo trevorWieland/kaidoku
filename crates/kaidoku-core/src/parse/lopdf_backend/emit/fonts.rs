@@ -94,6 +94,12 @@ impl<'a> FontCatalog<'a> {
             .map(|font| font.display_name.as_str())
     }
 
+    /// Deterministic iterator of all display names on this page, ordered by
+    /// the underlying font resource name (`BTreeMap` key ordering).
+    pub(super) fn iter_display_names(&self) -> impl Iterator<Item = &str> {
+        self.fonts.values().map(|font| font.display_name.as_str())
+    }
+
     #[must_use]
     pub(super) fn glyph_runs(&self, font_key: Option<&[u8]>, bytes: &[u8]) -> Vec<GlyphRun> {
         if bytes.is_empty() {
@@ -284,20 +290,28 @@ impl CidWidthTable {
 }
 
 fn width_table_for_font(document: &Document, font_dict: &Dictionary) -> WidthTable {
-    if let Some(table) = simple_width_table(font_dict) {
+    // Resolve MissingWidth once and thread it into every path — previously
+    // the simple-width table ignored it and used a hardcoded 500.0, causing
+    // bbox drift for unsupported code points.
+    let resolved_missing_width = missing_width(document, font_dict);
+
+    if let Some(table) = simple_width_table(font_dict, resolved_missing_width) {
         return WidthTable::OneByte(table);
     }
 
-    if let Some(table) = cid_width_table(document, font_dict) {
+    if let Some(table) = cid_width_table(document, font_dict, resolved_missing_width) {
         return WidthTable::Cid(table);
     }
 
     WidthTable::Fallback {
-        default_width: missing_width(document, font_dict).unwrap_or(DEFAULT_GLYPH_WIDTH_UNITS),
+        default_width: resolved_missing_width.unwrap_or(DEFAULT_GLYPH_WIDTH_UNITS),
     }
 }
 
-fn simple_width_table(font_dict: &Dictionary) -> Option<OneByteWidthTable> {
+fn simple_width_table(
+    font_dict: &Dictionary,
+    resolved_missing_width: Option<f64>,
+) -> Option<OneByteWidthTable> {
     let widths = font_dict.get(b"Widths").ok()?.as_array().ok()?;
     let first_char = object_to_u32(font_dict.get(b"FirstChar").ok()?)?;
     let parsed_widths = widths
@@ -308,16 +322,23 @@ fn simple_width_table(font_dict: &Dictionary) -> Option<OneByteWidthTable> {
     Some(OneByteWidthTable {
         first_char,
         widths: parsed_widths,
-        default_width: DEFAULT_GLYPH_WIDTH_UNITS,
+        default_width: resolved_missing_width.unwrap_or(DEFAULT_GLYPH_WIDTH_UNITS),
     })
 }
 
-fn cid_width_table(document: &Document, font_dict: &Dictionary) -> Option<CidWidthTable> {
+fn cid_width_table(
+    document: &Document,
+    font_dict: &Dictionary,
+    resolved_missing_width: Option<f64>,
+) -> Option<CidWidthTable> {
     let descendant = descendant_font(document, font_dict)?;
+    // /DW takes precedence per PDF spec; fall back to MissingWidth when /DW is
+    // absent, only then fall back to the CID 1000.0 constant.
     let default_width = descendant
         .get(b"DW")
         .ok()
         .and_then(object_to_f64)
+        .or(resolved_missing_width)
         .unwrap_or(1000.0);
 
     let mut specs = Vec::new();

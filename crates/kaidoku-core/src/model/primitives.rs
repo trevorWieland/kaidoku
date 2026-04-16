@@ -8,6 +8,8 @@ pub enum ValidationError {
     NonFiniteCoordinate,
     #[error("bbox width and height must be >= 0")]
     NegativeDimension,
+    #[error("value must be > 0")]
+    NonPositiveValue,
     #[error("page number must be >= 1")]
     InvalidPageNumber,
     #[error("font id must be >= 1")]
@@ -246,36 +248,6 @@ impl BBox {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CharPayload {
-    pub text: String,
-    pub font_id: Option<FontId>,
-    pub font_size: f64,
-    pub char_index: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SpanPayload {
-    pub text: String,
-    pub font_id: Option<FontId>,
-    pub font_size: f64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImagePayload {
-    pub name: String,
-    pub width_px: u32,
-    pub height_px: u32,
-    pub color_space: Option<String>,
-    pub bits_per_component: Option<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FontDescriptor {
-    pub id: FontId,
-    pub name: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct SourceRef {
     page_number: PageNumber,
@@ -375,118 +347,6 @@ impl SourceRef {
             self.element_index
         )
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum RawElement {
-    Char {
-        bbox: BBox,
-        source_ref: SourceRef,
-        payload: CharPayload,
-    },
-    Span {
-        bbox: BBox,
-        source_ref: SourceRef,
-        payload: SpanPayload,
-    },
-    Image {
-        bbox: BBox,
-        source_ref: SourceRef,
-        payload: ImagePayload,
-    },
-}
-
-impl RawElement {
-    #[must_use]
-    pub const fn char(bbox: BBox, source_ref: SourceRef, payload: CharPayload) -> Self {
-        Self::Char {
-            bbox,
-            source_ref,
-            payload,
-        }
-    }
-
-    #[must_use]
-    pub const fn span(bbox: BBox, source_ref: SourceRef, payload: SpanPayload) -> Self {
-        Self::Span {
-            bbox,
-            source_ref,
-            payload,
-        }
-    }
-
-    #[must_use]
-    pub const fn image(bbox: BBox, source_ref: SourceRef, payload: ImagePayload) -> Self {
-        Self::Image {
-            bbox,
-            source_ref,
-            payload,
-        }
-    }
-
-    #[must_use]
-    pub const fn bbox(&self) -> BBox {
-        match self {
-            Self::Char { bbox, .. } | Self::Span { bbox, .. } | Self::Image { bbox, .. } => *bbox,
-        }
-    }
-
-    #[must_use]
-    pub const fn source_ref(&self) -> SourceRef {
-        match self {
-            Self::Char { source_ref, .. }
-            | Self::Span { source_ref, .. }
-            | Self::Image { source_ref, .. } => *source_ref,
-        }
-    }
-
-    #[must_use]
-    pub const fn char_payload(&self) -> Option<&CharPayload> {
-        match self {
-            Self::Char { payload, .. } => Some(payload),
-            Self::Span { .. } | Self::Image { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn span_payload(&self) -> Option<&SpanPayload> {
-        match self {
-            Self::Span { payload, .. } => Some(payload),
-            Self::Char { .. } | Self::Image { .. } => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn image_payload(&self) -> Option<&ImagePayload> {
-        match self {
-            Self::Image { payload, .. } => Some(payload),
-            Self::Char { .. } | Self::Span { .. } => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExtractionPage {
-    pub page_number: PageNumber,
-    pub width: f64,
-    pub height: f64,
-    pub elements: Vec<RawElement>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExtractionSource {
-    pub backend: BackendIdentifier,
-    pub input_sha256: Sha256Digest,
-    pub input_bytes: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExtractionDocument {
-    pub schema_version: SchemaIdentifier,
-    pub source: ExtractionSource,
-    pub fonts: Vec<FontDescriptor>,
-    pub pages: Vec<ExtractionPage>,
 }
 
 fn quantize(value: f64, precision: u8) -> f64 {

@@ -1,4 +1,6 @@
-use crate::parse::lopdf_backend::emit::{ExtractionControl, decode::decode_content_stream_bounded};
+use crate::parse::lopdf_backend::emit::{
+    ExtractionControl, content_parser_bounded_for_fuzz, decode::decode_content_stream_bounded,
+};
 use crate::parse::lopdf_backend::resources::page_geometry;
 use crate::{BBox, PageNumber};
 use lopdf::{Document, Object, ObjectId, Stream, content::Content, dictionary};
@@ -30,6 +32,21 @@ pub fn fuzz_decode_filter_path(data: &[u8]) {
 
 pub fn fuzz_content_ops_path(data: &[u8]) {
     let _ = Content::decode(data);
+}
+
+/// Drive the custom kaidoku content-stream parser with arbitrary input.
+///
+/// Unlike `fuzz_content_ops_path` (which exercises lopdf's decoder), this
+/// harness targets the hardened parser that runs in production: depth-limited
+/// object nesting, spec-hardened inline-image EI termination, and streaming
+/// dispatch. It is the only fuzz target that can surface regressions in those
+/// paths.
+pub fn fuzz_content_parser_path(data: &[u8]) {
+    let Some(page_number) = PageNumber::new(1).ok() else {
+        return;
+    };
+    let control = ExtractionControl::new(5_000, None);
+    let _ = content_parser_bounded_for_fuzz(data, page_number, 128, &control);
 }
 
 pub fn fuzz_geometry_path(data: &[u8]) {

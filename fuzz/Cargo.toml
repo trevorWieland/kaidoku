@@ -32,5 +32,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "content_parser"
+path = "fuzz_targets/content_parser.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = []

@@ -1,6 +1,6 @@
 use crate::{BenchCommand, BenchSubcommands, Phase1BenchCommand};
 use anyhow::{Context, Result, bail};
-use kaidoku_core::{ExtractOptions, PageRange, PageSelection, extract_pdf};
+use kaidoku_core::{ExtractOptions, extract_pdf, extract_pdf_first_page};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -270,10 +270,10 @@ fn run_full_extraction(bytes: &[u8], path: &Path) -> Result<()> {
 }
 
 fn run_first_page_extraction(bytes: &[u8], path: &Path) -> Result<()> {
-    let first_page_options = ExtractOptions::builder()
-        .page_selection(PageSelection::Range(PageRange::new(1, 1)?))
-        .build()?;
-    let _first_page_doc = extract_pdf(bytes, first_page_options)
+    // Use the dedicated first-page fast path: this avoids the full page-tree
+    // walk and only extracts the first page, yielding a realistic
+    // latency-to-first-page metric for large PDFs.
+    let _first_page_doc = extract_pdf_first_page(bytes, ExtractOptions::default())
         .with_context(|| format!("first-page extraction failed for {}", path.display()))?;
     Ok(())
 }

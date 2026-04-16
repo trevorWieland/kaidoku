@@ -17,6 +17,7 @@ fuzzing = []
 [dependencies]
 flate2 = "1"
 lopdf = { workspace = true }
+rayon = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
