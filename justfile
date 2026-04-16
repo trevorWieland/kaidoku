@@ -154,6 +154,7 @@ phase1-fuzz-smoke:
     @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=20 -seed=2
     @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=20 -seed=3
     @cd fuzz && cargo +nightly fuzz run content_parser -- -max_total_time=20 -seed=4
+    @cd fuzz && cargo +nightly fuzz run decode_predictor -- -max_total_time=20 -seed=5
 
 # PR-blocking fuzz-smoke invoked from .github/workflows/ci.yml — a slightly
 # longer run than the local 20 s smoke so transient regressions surface before
@@ -164,6 +165,7 @@ phase1-fuzz-smoke-ci:
     @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=30 -seed=2
     @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=30 -seed=3
     @cd fuzz && cargo +nightly fuzz run content_parser -- -max_total_time=30 -seed=4
+    @cd fuzz && cargo +nightly fuzz run decode_predictor -- -max_total_time=30 -seed=5
 
 # Single orchestrated Phase-1 demo: produces artifacts, verifies goldens,
 # checks benchmarks against baseline, runs a short fuzz smoke, and writes a

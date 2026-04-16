@@ -20,6 +20,7 @@ fn tj_elements_have_unique_source_ref_indices() {
     let scope = page_resource_scope(&document, page_id);
     assert!(scope.is_ok());
     let Ok(scope) = scope else { return };
+    let scope = std::sync::Arc::new(scope);
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
     let decoded_budget = DecodedBudget::new(10_000_000);
@@ -79,6 +80,7 @@ fn text_state_persists_across_stream_boundaries() {
     let scope = page_resource_scope(&document, page_id);
     assert!(scope.is_ok());
     let Ok(scope) = scope else { return };
+    let scope = std::sync::Arc::new(scope);
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
     let decoded_budget = DecodedBudget::new(10_000_000);
@@ -135,7 +137,7 @@ fn inline_image_bi_emits_image_element() {
     let page_number = PageNumber::new(1).expect("page number");
 
     let geometry = page_geometry(&document, page_number, page_id, 32).expect("geometry");
-    let scope = page_resource_scope(&document, page_id).expect("scope");
+    let scope = std::sync::Arc::new(page_resource_scope(&document, page_id).expect("scope"));
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
     let decoded_budget = DecodedBudget::new(10_000_000);
@@ -245,7 +247,7 @@ fn form_xobject_recursion_emits_nested_image() {
 
     let page_number = PageNumber::new(1).expect("page number");
     let geometry = page_geometry(&document, page_number, page_id, 32).expect("geometry");
-    let scope = page_resource_scope(&document, page_id).expect("scope");
+    let scope = std::sync::Arc::new(page_resource_scope(&document, page_id).expect("scope"));
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
     let decoded_budget = DecodedBudget::new(10_000_000);
@@ -336,7 +338,7 @@ fn form_cycle_is_reported_as_structural_error() {
 
     let page_number = PageNumber::new(1).expect("page number");
     let geometry = page_geometry(&document, page_number, page_id, 32).expect("geometry");
-    let scope = page_resource_scope(&document, page_id).expect("scope");
+    let scope = std::sync::Arc::new(page_resource_scope(&document, page_id).expect("scope"));
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
     let decoded_budget = DecodedBudget::new(10_000_000);

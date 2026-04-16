@@ -1,5 +1,5 @@
 use super::state::{GraphicsState, TextState};
-use super::{EmitContext, OperationCursor};
+use super::{EmitContext, ExtractionStage, OperationCursor};
 use crate::{BBox, CharPayload, ExtractError, SpanPayload};
 use lopdf::Object;
 
@@ -41,6 +41,7 @@ pub(super) fn emit_text_array(
 struct PlacedGlyph {
     character: char,
     bbox: BBox,
+    component_count: u8,
 }
 
 pub(super) fn emit_text_elements(
@@ -55,6 +56,18 @@ pub(super) fn emit_text_elements(
         Object::String(bytes, _) => bytes.as_slice(),
         _ => return Ok(()),
     };
+
+    if !text_state.font_size_valid() {
+        // Malformed producer emitted a zero / non-finite Tf font size. Record
+        // the event on the control stream so downstream telemetry can observe
+        // the skipped run, then degrade gracefully — the whole document must
+        // not fail just because one operator is broken.
+        context.control().checkpoint(
+            ExtractionStage::TextSkippedInvalidFontSize,
+            Some(context.page_number()),
+        )?;
+        return Ok(());
+    }
 
     let glyph_runs = context
         .font_catalog
@@ -82,20 +95,39 @@ pub(super) fn emit_text_elements(
     // Single pass over glyph runs: compute each glyph's bbox once, union it
     // into the span's bbox, and retain the per-glyph result so the char
     // emission loop below can reuse it without recomputing advances or
-    // transforms. This collapses the previous probe/emit dual pass.
+    // transforms. Glyphs that expand to multiple Unicode codepoints
+    // (ligatures, CMap expansions) share one bbox across all components so
+    // the geometry is an honest reflection of the PDF — we do not synthesise
+    // intra-glyph positions the PDF never provided.
     let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(char_count);
     let mut span_bbox: Option<BBox> = None;
     for run in &glyph_runs {
-        let advances = glyph_char_advances(text_state, run.text.as_str(), run.width_units.max(0.0));
-        for (character, glyph_advance, total_advance) in advances {
-            let bbox = char_bbox_for_state(text_state, graphics_state, glyph_advance)?;
-            span_bbox = Some(match span_bbox {
-                None => bbox,
-                Some(previous) => merge_bbox(previous, bbox)?,
-            });
-            placed.push(PlacedGlyph { character, bbox });
-            text_state.advance_text(total_advance);
+        let chars = run.text.chars().collect::<Vec<char>>();
+        if chars.is_empty() {
+            continue;
         }
+        let glyph_advance = (run.width_units.max(0.0) / 1000.0)
+            * text_state.font_size()
+            * text_state.horizontal_scale_factor();
+        let spacing_advance = glyph_spacing_advance(text_state, &chars);
+
+        let bbox = char_bbox_for_state(text_state, graphics_state, glyph_advance.max(0.0))?;
+        span_bbox = Some(match span_bbox {
+            None => bbox,
+            Some(previous) => merge_bbox(previous, bbox)?,
+        });
+
+        let component_count =
+            u8::try_from(chars.len().min(usize::from(u8::MAX))).unwrap_or(u8::MAX);
+        for character in chars {
+            placed.push(PlacedGlyph {
+                character,
+                bbox,
+                component_count,
+            });
+        }
+
+        text_state.advance_text((glyph_advance + spacing_advance).max(0.0));
     }
 
     let span_bbox = if let Some(span_bbox) = span_bbox {
@@ -128,51 +160,17 @@ pub(super) fn emit_text_elements(
             operation_index,
             char_element_index,
             glyph.bbox,
-            CharPayload::new(
+            CharPayload::with_glyph_component_count(
                 glyph.character.to_string(),
                 font_id,
                 text_state.font_size(),
                 char_index,
+                glyph.component_count,
             )?,
         )?;
     }
 
     Ok(())
-}
-
-fn glyph_char_advances(
-    text_state: &TextState,
-    glyph_text: &str,
-    glyph_width_units: f64,
-) -> Vec<(char, f64, f64)> {
-    let chars = glyph_text.chars().collect::<Vec<char>>();
-    if chars.is_empty() {
-        return Vec::new();
-    }
-
-    let glyph_advance = (glyph_width_units / 1000.0)
-        * text_state.font_size()
-        * text_state.horizontal_scale_factor();
-    let spacing_advance = glyph_spacing_advance(text_state, &chars);
-    let chars_len = chars.len();
-    let per_char_advance = if chars_len == 1 {
-        glyph_advance.max(0.0)
-    } else {
-        let chars_len_f64 = u32::try_from(chars_len).ok().map_or(1.0, f64::from);
-        (glyph_advance / chars_len_f64).max(0.0)
-    };
-
-    let mut out = Vec::with_capacity(chars_len);
-    for (index, character) in chars.into_iter().enumerate() {
-        let is_last = index + 1 == chars_len;
-        let total_advance = if is_last {
-            (per_char_advance + spacing_advance).max(0.0)
-        } else {
-            per_char_advance.max(0.0)
-        };
-        out.push((character, per_char_advance, total_advance));
-    }
-    out
 }
 
 fn glyph_spacing_advance(text_state: &TextState, glyph_chars: &[char]) -> f64 {

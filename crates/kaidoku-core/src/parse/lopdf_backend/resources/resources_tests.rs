@@ -218,7 +218,7 @@ fn page_resource_scope_and_form_scope_resolve_xobjects() {
         }),
     );
 
-    let scope = page_resource_scope(&document, page_id).expect("scope");
+    let scope = std::sync::Arc::new(page_resource_scope(&document, page_id).expect("scope"));
     assert!(scope.resolve_xobject(b"Im1").is_some());
     assert!(scope.resolve_xobject(b"Fm1").is_some());
 
@@ -228,11 +228,26 @@ fn page_resource_scope_and_form_scope_resolve_xobjects() {
         .as_stream()
         .expect("form stream");
     let mut cache = HashMap::new();
-    let nested_scope = form_resource_scope(&document, &scope, form_id, form_stream, &mut cache);
+    let nested_scope = form_resource_scope(
+        &document,
+        std::sync::Arc::clone(&scope),
+        form_id,
+        form_stream,
+        &mut cache,
+    );
     assert!(nested_scope.resolve_xobject(b"NestedImage").is_some());
 
-    let cached_scope = form_resource_scope(&document, &scope, form_id, form_stream, &mut cache);
+    // Recursion into the same form must not deep-clone the parent chain:
+    // we assert the parent `Arc` is shared between the two child scopes.
+    let cached_scope = form_resource_scope(
+        &document,
+        std::sync::Arc::clone(&scope),
+        form_id,
+        form_stream,
+        &mut cache,
+    );
     assert!(cached_scope.resolve_xobject(b"NestedImage").is_some());
+    assert!(std::sync::Arc::strong_count(&scope) >= 3);
 
     let metadata = image_metadata_for_object(&document, image_id, b"Im1").expect("metadata");
     assert_eq!(metadata.width_px, 10);

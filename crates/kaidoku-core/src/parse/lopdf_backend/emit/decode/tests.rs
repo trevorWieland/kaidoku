@@ -1,6 +1,6 @@
 use super::{
-    ExtractionControl, decode_ascii_hex_bounded, decode_lzw_bounded, decode_run_length_bounded,
-    decode_zlib_bounded,
+    ExtractionControl, decode_ascii_hex_bounded, decode_ascii85_bounded, decode_lzw_bounded,
+    decode_run_length_bounded, decode_zlib_bounded,
 };
 use crate::PageNumber;
 use weezl::{BitOrder, encode::Encoder as LzwEncoder};
@@ -50,6 +50,61 @@ fn decode_respects_timeout_guard() {
         result,
         Err(crate::ExtractError::ExtractionTimeoutExceeded { .. })
     ));
+}
+
+#[test]
+fn ascii85_decodes_known_stream_without_eod() {
+    let page_number = PageNumber::new(1).expect("page number");
+    let control = ExtractionControl::new(10_000, None);
+    // "Man " encodes as "9jqo^". Verified against the canonical ASCII85 table.
+    let decoded = decode_ascii85_bounded(b"9jqo^", page_number, 0, 1024, &control).expect("decode");
+    assert_eq!(decoded, b"Man ");
+}
+
+#[test]
+fn ascii85_accepts_trailing_whitespace_after_eod() {
+    let page_number = PageNumber::new(1).expect("page number");
+    let control = ExtractionControl::new(10_000, None);
+    let decoded =
+        decode_ascii85_bounded(b"9jqo^~>\n", page_number, 0, 1024, &control).expect("decode");
+    assert_eq!(decoded, b"Man ");
+}
+
+#[test]
+fn ascii85_rejects_invalid_byte_mid_stream() {
+    let page_number = PageNumber::new(1).expect("page number");
+    let control = ExtractionControl::new(10_000, None);
+    let err = decode_ascii85_bounded(b"9j\x00qo^", page_number, 0, 1024, &control)
+        .expect_err("invalid byte");
+    assert!(err.to_string().contains("invalid byte"));
+}
+
+#[test]
+fn ascii85_rejects_trailing_garbage_after_eod() {
+    let page_number = PageNumber::new(1).expect("page number");
+    let control = ExtractionControl::new(10_000, None);
+    let err = decode_ascii85_bounded(b"9jqo^~>garbage", page_number, 0, 1024, &control)
+        .expect_err("garbage");
+    assert!(err.to_string().contains("trailing byte"));
+}
+
+#[test]
+fn ascii85_rejects_incomplete_final_group() {
+    let page_number = PageNumber::new(1).expect("page number");
+    let control = ExtractionControl::new(10_000, None);
+    // Only 1 meaningful byte after the previous group — ambiguous per spec.
+    let err = decode_ascii85_bounded(b"9jqo^!", page_number, 0, 1024, &control)
+        .expect_err("incomplete group");
+    assert!(err.to_string().contains("incomplete final group"));
+}
+
+#[test]
+fn ascii85_rejects_lonely_tilde() {
+    let page_number = PageNumber::new(1).expect("page number");
+    let control = ExtractionControl::new(10_000, None);
+    let err =
+        decode_ascii85_bounded(b"9j~X", page_number, 0, 1024, &control).expect_err("lonely tilde");
+    assert!(err.to_string().contains('`'));
 }
 
 #[test]

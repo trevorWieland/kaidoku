@@ -39,5 +39,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "decode_predictor"
+path = "fuzz_targets/decode_predictor.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = []

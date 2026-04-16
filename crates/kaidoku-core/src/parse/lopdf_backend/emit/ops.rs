@@ -7,6 +7,70 @@ use super::{
 };
 use crate::{BBox, ExtractError, ImagePayload};
 use lopdf::{Object, Stream, content::Operation};
+use std::sync::Arc;
+
+/// Typed PDF operator dispatched by the emitter.
+///
+/// Adding a new variant forces every match site to update, so an unknown
+/// operator cannot silently take a default code path. Unknown operators from
+/// the wild (e.g. vendor extensions) collapse into [`OpCode::Other`] and
+/// become no-ops — classification happens once at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpCode {
+    // Graphics state
+    Cm,
+    PushGraphics,
+    PopGraphics,
+    // XObject / inline image
+    InlineImageBegin,
+    XObjectInvocation,
+    // Text state
+    BeginText,
+    SetFont,
+    SetCharSpacing,
+    SetWordSpacing,
+    SetHorizontalScaling,
+    SetLeading,
+    SetTextRise,
+    MoveText,
+    MoveTextSetLeading,
+    SetTextMatrix,
+    NextLine,
+    // Text showing
+    NextLineShow,
+    SetSpacingAndShow,
+    ShowText,
+    ShowTextArray,
+    Other,
+}
+
+impl OpCode {
+    fn from_operator(raw: &str) -> Self {
+        match raw {
+            "cm" => Self::Cm,
+            "q" => Self::PushGraphics,
+            "Q" => Self::PopGraphics,
+            "BI" => Self::InlineImageBegin,
+            "Do" => Self::XObjectInvocation,
+            "BT" => Self::BeginText,
+            "Tf" => Self::SetFont,
+            "Tc" => Self::SetCharSpacing,
+            "Tw" => Self::SetWordSpacing,
+            "Tz" => Self::SetHorizontalScaling,
+            "TL" => Self::SetLeading,
+            "Ts" => Self::SetTextRise,
+            "Td" => Self::MoveText,
+            "TD" => Self::MoveTextSetLeading,
+            "Tm" => Self::SetTextMatrix,
+            "T*" => Self::NextLine,
+            "'" => Self::NextLineShow,
+            "\"" => Self::SetSpacingAndShow,
+            "Tj" => Self::ShowText,
+            "TJ" => Self::ShowTextArray,
+            _ => Self::Other,
+        }
+    }
+}
 
 pub(super) fn process_operation(
     operation: &Operation,
@@ -15,14 +79,17 @@ pub(super) fn process_operation(
     graphics_state: &mut GraphicsState,
     cursor: &mut OperationCursor,
     context: &mut EmitContext<'_>,
-    shared: (&ResourceScope, &mut ProcessRuntime<'_>),
+    shared: (&Arc<ResourceScope>, &mut ProcessRuntime<'_>),
 ) -> Result<(), ExtractError> {
     let (scope, runtime) = shared;
-    if handle_text_state_operation(operation, text_state)? {
+    let op = OpCode::from_operator(operation.operator.as_str());
+
+    if handle_text_state_operation(op, operation, text_state)? {
         return Ok(());
     }
 
     if handle_text_show_operation(
+        op,
         operation,
         operation_index,
         text_state,
@@ -33,14 +100,14 @@ pub(super) fn process_operation(
         return Ok(());
     }
 
-    match operation.operator.as_str() {
-        "cm" => {
+    match op {
+        OpCode::Cm => {
             let matrix = Matrix::from_operands(&operation.operands)?;
             graphics_state.concatenate_ctm(matrix);
         }
-        "q" => graphics_state.save(),
-        "Q" => graphics_state.restore(),
-        "BI" => {
+        OpCode::PushGraphics => graphics_state.save(),
+        OpCode::PopGraphics => graphics_state.restore(),
+        OpCode::InlineImageBegin => {
             maybe_emit_inline_image_element(
                 operation,
                 graphics_state.ctm(),
@@ -49,7 +116,7 @@ pub(super) fn process_operation(
                 context,
             )?;
         }
-        "Do" => {
+        OpCode::XObjectInvocation => {
             if let Some(first) = operation.operands.first() {
                 handle_xobject_invocation(
                     first,
@@ -70,7 +137,7 @@ pub(super) fn process_operation(
 
 fn handle_xobject_invocation(
     name_object: &Object,
-    scope: &ResourceScope,
+    scope: &Arc<ResourceScope>,
     ctm: Matrix,
     operation_index: u32,
     cursor: &mut OperationCursor,
@@ -148,7 +215,7 @@ fn handle_xobject_invocation(
     runtime.traversal.enter(object_id)?;
     let child_scope = resources::form_resource_scope(
         runtime.document,
-        scope,
+        Arc::clone(scope),
         object_id,
         stream,
         runtime.form_scope_cache,
@@ -264,40 +331,43 @@ fn extract_color_space(value: &Object) -> Option<String> {
 }
 
 fn handle_text_state_operation(
+    op: OpCode,
     operation: &Operation,
     text_state: &mut TextState,
 ) -> Result<bool, ExtractError> {
-    match operation.operator.as_str() {
-        "BT" => text_state.begin_text_object(),
-        "Tf" => update_text_font(operation, text_state)?,
-        "Tc" => {
+    match op {
+        OpCode::BeginText => text_state.begin_text_object(),
+        OpCode::SetFont => update_text_font(operation, text_state)?,
+        OpCode::SetCharSpacing => {
             if let Some(first) = operation.operands.first() {
                 text_state.set_char_spacing(object_to_f64(first)?);
             }
         }
-        "Tw" => {
+        OpCode::SetWordSpacing => {
             if let Some(first) = operation.operands.first() {
                 text_state.set_word_spacing(object_to_f64(first)?);
             }
         }
-        "Tz" => {
+        OpCode::SetHorizontalScaling => {
             if let Some(first) = operation.operands.first() {
                 text_state.set_horizontal_scaling(object_to_f64(first)?);
             }
         }
-        "TL" => {
+        OpCode::SetLeading => {
             if let Some(first) = operation.operands.first() {
                 text_state.set_leading(object_to_f64(first)?);
             }
         }
-        "Ts" => {
+        OpCode::SetTextRise => {
             if let Some(first) = operation.operands.first() {
                 text_state.set_text_rise(object_to_f64(first)?);
             }
         }
-        "Td" | "TD" => update_text_position(operation, text_state)?,
-        "Tm" => update_text_matrix(operation, text_state)?,
-        "T*" => text_state.next_line(),
+        OpCode::MoveText | OpCode::MoveTextSetLeading => {
+            update_text_position(op, operation, text_state)?;
+        }
+        OpCode::SetTextMatrix => update_text_matrix(operation, text_state)?,
+        OpCode::NextLine => text_state.next_line(),
         _ => return Ok(false),
     }
 
@@ -305,6 +375,7 @@ fn handle_text_state_operation(
 }
 
 fn handle_text_show_operation(
+    op: OpCode,
     operation: &Operation,
     operation_index: u32,
     text_state: &mut TextState,
@@ -312,8 +383,8 @@ fn handle_text_show_operation(
     cursor: &mut OperationCursor,
     context: &mut EmitContext<'_>,
 ) -> Result<bool, ExtractError> {
-    match operation.operator.as_str() {
-        "'" => {
+    match op {
+        OpCode::NextLineShow => {
             text_state.next_line();
             if let Some(first) = operation.operands.first() {
                 text::emit_text_elements(
@@ -326,7 +397,7 @@ fn handle_text_show_operation(
                 )?;
             }
         }
-        "\"" => {
+        OpCode::SetSpacingAndShow => {
             if operation.operands.len() >= 2 {
                 text_state.set_word_spacing(object_to_f64(&operation.operands[0])?);
                 text_state.set_char_spacing(object_to_f64(&operation.operands[1])?);
@@ -343,7 +414,7 @@ fn handle_text_show_operation(
                 )?;
             }
         }
-        "Tj" => {
+        OpCode::ShowText => {
             if let Some(first) = operation.operands.first() {
                 text::emit_text_elements(
                     first,
@@ -355,7 +426,7 @@ fn handle_text_show_operation(
                 )?;
             }
         }
-        "TJ" => {
+        OpCode::ShowTextArray => {
             if let Some(first) = operation.operands.first() {
                 text::emit_text_array(
                     first,
@@ -376,20 +447,23 @@ fn handle_text_show_operation(
 fn update_text_font(operation: &Operation, text_state: &mut TextState) -> Result<(), ExtractError> {
     if operation.operands.len() >= 2 {
         let key = operation.operands[0].as_name().ok().map(<[u8]>::to_vec);
-        let font_size = object_to_f64(&operation.operands[1])?.abs();
+        let font_size = object_to_f64(&operation.operands[1])?;
+        // `TextState::set_font` disables text emission on zero/NaN/±∞ sizes.
+        // No guarding needed here.
         text_state.set_font(key, font_size);
     }
     Ok(())
 }
 
 fn update_text_position(
+    op: OpCode,
     operation: &Operation,
     text_state: &mut TextState,
 ) -> Result<(), ExtractError> {
     if operation.operands.len() >= 2 {
         let tx = object_to_f64(&operation.operands[0])?;
         let ty = object_to_f64(&operation.operands[1])?;
-        text_state.move_text_position(tx, ty, operation.operator == "TD");
+        text_state.move_text_position(tx, ty, matches!(op, OpCode::MoveTextSetLeading));
     }
     Ok(())
 }

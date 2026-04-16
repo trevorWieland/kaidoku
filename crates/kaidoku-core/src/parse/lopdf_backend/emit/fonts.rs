@@ -429,6 +429,13 @@ fn object_to_u32(value: &Object) -> Option<u32> {
         .and_then(|number| u32::try_from(number).ok())
 }
 
+/// Option-returning widener for font-table entries.
+///
+/// The numeric pipeline's canonical boundary is
+/// [`crate::parse::lopdf_backend::emit::object_to_f64`], but the font-width
+/// parser chains widely through `.ok()?` and would bloat considerably with
+/// `Result`. This helper keeps the f32-to-f64 widening identical to the
+/// canonical boundary while returning `Option` for local ergonomics.
 fn object_to_f64(value: &Object) -> Option<f64> {
     value.as_float().ok().map(f64::from)
 }

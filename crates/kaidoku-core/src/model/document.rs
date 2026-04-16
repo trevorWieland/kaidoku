@@ -1,6 +1,7 @@
 use super::primitives::{BBox, FontId, PageNumber, SourceRef, ValidationError};
 use super::scalars::{NonNegativeFinite, PositiveFinite};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::num::NonZeroU8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CharPayload {
@@ -8,6 +9,14 @@ pub struct CharPayload {
     font_id: Option<FontId>,
     font_size: PositiveFinite,
     char_index: u32,
+    /// Number of Unicode codepoints the originating PDF glyph expanded to.
+    ///
+    /// The common case is `1` (one glyph → one codepoint). For ligatures and
+    /// CMap-expanded glyphs this is `>1`, in which case every component char
+    /// of the same glyph shares the glyph's bbox — the PDF did not give us
+    /// per-component spatial resolution, so we surface that uncertainty
+    /// explicitly instead of splitting the glyph's advance evenly.
+    glyph_component_count: NonZeroU8,
 }
 
 impl CharPayload {
@@ -17,11 +26,24 @@ impl CharPayload {
         font_size: f64,
         char_index: u32,
     ) -> Result<Self, ValidationError> {
+        Self::with_glyph_component_count(text, font_id, font_size, char_index, 1)
+    }
+
+    pub fn with_glyph_component_count(
+        text: impl Into<String>,
+        font_id: Option<FontId>,
+        font_size: f64,
+        char_index: u32,
+        glyph_component_count: u8,
+    ) -> Result<Self, ValidationError> {
+        let component_count = NonZeroU8::new(glyph_component_count)
+            .ok_or(ValidationError::InvalidGlyphComponentCount)?;
         Ok(Self {
             text: text.into(),
             font_id,
             font_size: PositiveFinite::new(font_size)?,
             char_index,
+            glyph_component_count: component_count,
         })
     }
 
@@ -44,6 +66,15 @@ impl CharPayload {
     pub const fn char_index(&self) -> u32 {
         self.char_index
     }
+
+    #[must_use]
+    pub const fn glyph_component_count(&self) -> u8 {
+        self.glyph_component_count.get()
+    }
+}
+
+fn is_one_glyph_component(count: NonZeroU8) -> bool {
+    count.get() == 1
 }
 
 impl Serialize for CharPayload {
@@ -52,11 +83,15 @@ impl Serialize for CharPayload {
         S: Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("CharPayload", 4)?;
+        let extra = usize::from(!is_one_glyph_component(self.glyph_component_count));
+        let mut state = serializer.serialize_struct("CharPayload", 4 + extra)?;
         state.serialize_field("text", &self.text)?;
         state.serialize_field("font_id", &self.font_id)?;
         state.serialize_field("font_size", &self.font_size)?;
         state.serialize_field("char_index", &self.char_index)?;
+        if !is_one_glyph_component(self.glyph_component_count) {
+            state.serialize_field("glyph_component_count", &self.glyph_component_count.get())?;
+        }
         state.end()
     }
 }
@@ -72,10 +107,21 @@ impl<'de> Deserialize<'de> for CharPayload {
             font_id: Option<FontId>,
             font_size: f64,
             char_index: u32,
+            #[serde(default = "default_glyph_component_count")]
+            glyph_component_count: u8,
+        }
+        fn default_glyph_component_count() -> u8 {
+            1
         }
         let raw = Raw::deserialize(deserializer)?;
-        Self::new(raw.text, raw.font_id, raw.font_size, raw.char_index)
-            .map_err(serde::de::Error::custom)
+        Self::with_glyph_component_count(
+            raw.text,
+            raw.font_id,
+            raw.font_size,
+            raw.char_index,
+            raw.glyph_component_count,
+        )
+        .map_err(serde::de::Error::custom)
     }
 }
 

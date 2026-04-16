@@ -9,6 +9,7 @@ use crate::{
     ExtractError, ExtractOptions, PageRange, PageSelection, extract_pdf, extract_pdf_first_page,
     to_canonical_json,
 };
+use std::fmt::Write as _;
 use std::fs;
 
 #[test]
@@ -189,8 +190,6 @@ fn deeply_nested_array_in_content_stream_triggers_explicit_error() {
 /// Build a minimal one-page PDF with the supplied content-stream bytes. Used by
 /// adversarial tests that don't want to grow the pinned fixture corpus.
 fn build_minimal_pdf(content: &[u8]) -> Vec<u8> {
-    use std::fmt::Write as _;
-
     // Hand-crafted PDF 1.4 skeleton. Object offsets in the xref are computed
     // after the body is assembled so the file stays valid.
     let content_stream = format!(
@@ -220,6 +219,196 @@ fn build_minimal_pdf(content: &[u8]) -> Vec<u8> {
     let _ = writeln!(body, "{obj3_offset:010} 00000 n ");
     let _ = writeln!(body, "{obj4_offset:010} 00000 n ");
     body.push_str("trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n");
+    let _ = writeln!(body, "{xref_offset}");
+    body.push_str("%%EOF\n");
+    body.into_bytes()
+}
+
+#[test]
+fn fast_path_enforces_max_pages_like_slow_path() {
+    // Tightened max_pages=0 forces the limit to trigger on any real document.
+    // Both paths must reject identically; previously the fast path silently
+    // skipped the check.
+    let fixture_path = corpus_dir().join("doclaynet_simple_text.pdf");
+    let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+    let options = ExtractOptions::builder()
+        .max_pages(1)
+        // Use a fixture that would exceed this limit in practice: the
+        // simple-text corpus has more than one page.
+        .build()
+        .expect("options");
+
+    // Use a tighter limit to guarantee the fixture fails.
+    let tight = ExtractOptions::builder()
+        .max_pages(1)
+        .page_selection(PageSelection::Range(PageRange::new(1, 1).expect("range")))
+        .build()
+        .expect("options");
+
+    // Run slow path with a max_pages that the fixture definitely exceeds.
+    // We cap to 0 via a special builder would-be hack; instead, we lean on
+    // max_pages=0 being rejected at builder level. So we pick max_pages=0
+    // equivalent by using the builder at max_pages=1 and falling back to
+    // a known-multi-page fixture. This asserts equivalence of rejection
+    // when the limit is small relative to the actual document.
+    let _ = (options, tight, bytes);
+
+    // Instead, exercise the identical-rejection shape via a tiny synthetic
+    // PDF with two pages.
+    let pdf = build_two_page_pdf();
+    let tight_options = ExtractOptions::builder()
+        .max_pages(1)
+        .build()
+        .expect("options");
+
+    let slow_err = extract_pdf(&pdf, tight_options.clone()).expect_err("slow rejects");
+    let fast_err = extract_pdf_first_page(&pdf, tight_options).expect_err("fast rejects");
+
+    assert!(matches!(
+        slow_err,
+        ExtractError::PageLimitExceeded {
+            limit_pages: 1,
+            actual_pages: 2
+        }
+    ));
+    assert!(matches!(
+        fast_err,
+        ExtractError::PageLimitExceeded {
+            limit_pages: 1,
+            actual_pages: 2
+        }
+    ));
+}
+
+#[test]
+fn fast_path_rejects_selection_that_excludes_page_1() {
+    let fixture_path = corpus_dir().join("doclaynet_simple_text.pdf");
+    let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+    let options = ExtractOptions::builder()
+        .page_selection(PageSelection::Range(PageRange::new(2, 2).expect("range")))
+        .build()
+        .expect("options");
+
+    let err = extract_pdf_first_page(&bytes, options).expect_err("must reject");
+    assert!(
+        matches!(err, ExtractError::PageOutOfBounds { page: 1, .. }),
+        "expected PageOutOfBounds {{page:1}}, got {err:?}"
+    );
+}
+
+#[test]
+fn zero_font_size_content_stream_degrades_gracefully() {
+    // A minimal content stream that sets font size 0 (producer defect) and
+    // then attempts to show text. Pre-remediation this returned a fatal
+    // InvalidFallbackGeometry-adjacent error; post-remediation the text
+    // operator is skipped and the document still extracts successfully.
+    let mut stream = String::new();
+    stream.push_str("BT\n");
+    stream.push_str("/F1 0 Tf\n");
+    stream.push_str("50 400 Td\n");
+    stream.push_str("(text) Tj\n");
+    stream.push_str("ET\n");
+
+    let pdf = build_minimal_pdf(stream.as_bytes());
+    let document = extract_pdf(&pdf, ExtractOptions::default())
+        .expect("zero font size must not abort extraction");
+    assert_eq!(document.pages().len(), 1);
+    let chars = document.pages()[0]
+        .elements()
+        .iter()
+        .filter(|element| element.char_payload().is_some())
+        .count();
+    assert_eq!(chars, 0, "zero font size must not emit char elements");
+}
+
+#[test]
+fn ligature_component_chars_share_glyph_bbox() {
+    // The `pdfjs_identity_to_unicode_map_char_code_of` fixture contains an
+    // Identity-H CMap where a single byte decodes into multiple Unicode
+    // codepoints — that is the canonical "ligature / CMap expansion" case
+    // the audit wanted us to handle accurately. The simpler ligatures
+    // fixture, despite its name, still decodes one codepoint per glyph.
+    let fixture_path = corpus_dir().join("pdfjs_identity_to_unicode_map_char_code_of.pdf");
+    let bytes = fs::read(&fixture_path).expect("fixture must be readable");
+    let document =
+        extract_pdf(&bytes, ExtractOptions::default()).expect("fixture extraction should succeed");
+
+    // Sanity invariant: if a page emits any multi-component char, at least
+    // two of those chars in the same TJ/Tj operation must share bbox to
+    // exact precision — that is the whole point of the glyph-accurate
+    // rewrite. We walk page elements and, for each operation that produced
+    // at least one multi-component char, verify at least one pair of chars
+    // with glyph_component_count>1 shares bbox to 1e-9.
+    let mut observed_multicomponent = false;
+    let mut observed_shared_bbox = false;
+    for page in document.pages() {
+        let mut by_op: std::collections::BTreeMap<(u32, u32), Vec<crate::BBox>> =
+            std::collections::BTreeMap::new();
+        for element in page.elements() {
+            let Some(payload) = element.char_payload() else {
+                continue;
+            };
+            if payload.glyph_component_count() <= 1 {
+                continue;
+            }
+            observed_multicomponent = true;
+            let key = (
+                element.source_ref().stream_index(),
+                element.source_ref().operation_index(),
+            );
+            by_op.entry(key).or_default().push(element.bbox());
+        }
+
+        for boxes in by_op.values() {
+            for (outer_idx, outer) in boxes.iter().enumerate() {
+                for inner in &boxes[outer_idx + 1..] {
+                    if (outer.x() - inner.x()).abs() < 1e-9
+                        && (outer.width() - inner.width()).abs() < 1e-9
+                        && (outer.y() - inner.y()).abs() < 1e-9
+                        && (outer.height() - inner.height()).abs() < 1e-9
+                    {
+                        observed_shared_bbox = true;
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(
+        observed_multicomponent,
+        "ligature fixture must contain at least one glyph_component_count>1 char"
+    );
+    assert!(
+        observed_shared_bbox,
+        "multi-component glyphs must share bbox with at least one sibling in the same operation"
+    );
+}
+
+fn build_two_page_pdf() -> Vec<u8> {
+    let mut body = String::new();
+    body.push_str("%PDF-1.4\n");
+    let obj1 = body.len();
+    body.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    let obj2 = body.len();
+    body.push_str("2 0 obj\n<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >>\nendobj\n");
+    let obj3 = body.len();
+    body.push_str(
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R >>\nendobj\n",
+    );
+    let obj4 = body.len();
+    body.push_str(
+        "4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R >>\nendobj\n",
+    );
+    let obj5 = body.len();
+    body.push_str("5 0 obj\n<< /Length 2 >>\nstream\nq\nendstream\nendobj\n");
+    let xref_offset = body.len();
+    body.push_str("xref\n0 6\n0000000000 65535 f \n");
+    let _ = writeln!(body, "{obj1:010} 00000 n ");
+    let _ = writeln!(body, "{obj2:010} 00000 n ");
+    let _ = writeln!(body, "{obj3:010} 00000 n ");
+    let _ = writeln!(body, "{obj4:010} 00000 n ");
+    let _ = writeln!(body, "{obj5:010} 00000 n ");
+    body.push_str("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n");
     let _ = writeln!(body, "{xref_offset}");
     body.push_str("%%EOF\n");
     body.into_bytes()

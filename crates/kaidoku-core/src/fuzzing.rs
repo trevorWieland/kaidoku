@@ -30,6 +30,62 @@ pub fn fuzz_decode_filter_path(data: &[u8]) {
     let _ = decode_content_stream_bounded(&stream, page_number, 0, 1024 * 1024, &control);
 }
 
+/// Fuzz the PNG predictor pipeline after Flate decompression.
+///
+/// The first byte picks the predictor (1 identity, 2 TIFF, 10..=15 PNG
+/// variants), the next byte picks Columns, the next Colors, the next
+/// BitsPerComponent, and the remainder is the Flate-encoded payload.
+pub fn fuzz_decode_predictor_path(data: &[u8]) {
+    let Some(page_number) = PageNumber::new(1).ok() else {
+        return;
+    };
+
+    let mut cursor = data.iter();
+    let predictor = cursor
+        .next()
+        .copied()
+        .map(|value| match value % 8 {
+            0 => 1,
+            1 => 2,
+            2 => 10,
+            3 => 11,
+            4 => 12,
+            5 => 13,
+            6 => 14,
+            _ => 15,
+        })
+        .unwrap_or(1);
+    let columns = cursor
+        .next()
+        .copied()
+        .map_or(1, |value| i64::from(value) + 1);
+    let colors = cursor
+        .next()
+        .copied()
+        .map_or(1, |value| i64::from(value % 4 + 1));
+    let bpc = cursor
+        .next()
+        .copied()
+        .map_or(8, |value| i64::from(value % 16 + 1));
+    let payload = cursor.copied().collect::<Vec<u8>>();
+
+    let stream = Stream::new(
+        dictionary! {
+            "Filter" => "FlateDecode",
+            "DecodeParms" => dictionary! {
+                "Predictor" => predictor,
+                "Columns" => columns,
+                "Colors" => colors,
+                "BitsPerComponent" => bpc,
+            },
+        },
+        payload,
+    );
+
+    let control = ExtractionControl::new(5_000, None);
+    let _ = decode_content_stream_bounded(&stream, page_number, 0, 1024 * 1024, &control);
+}
+
 pub fn fuzz_content_ops_path(data: &[u8]) {
     let _ = Content::decode(data);
 }

@@ -1,9 +1,11 @@
+mod pages;
+
 use crate::ExtractCommand;
 use anyhow::{Context, Result, anyhow, bail};
 use kaidoku_core::{
-    ExtractOptions, PageRange, PageSelection, default_max_input_bytes, extract_pdf,
-    to_canonical_json,
+    ExtractOptions, PageSelection, default_max_input_bytes, extract_pdf, to_canonical_json,
 };
+use pages::parse_pages_spec;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -191,96 +193,11 @@ fn stable_input_hint(input_path: &Path) -> String {
     )
 }
 
-fn parse_pages_spec(spec: Option<&str>) -> Result<PageSelection> {
-    let Some(raw_spec) = spec else {
-        return Ok(PageSelection::All);
-    };
-
-    let trimmed = raw_spec.trim();
-    if trimmed.eq_ignore_ascii_case("all") {
-        return Ok(PageSelection::All);
-    }
-
-    let mut explicit_pages = Vec::new();
-    let mut parsed_range: Option<PageRange> = None;
-
-    for token in trimmed.split(',') {
-        let entry = token.trim();
-        if entry.is_empty() {
-            continue;
-        }
-
-        if let Some((start, end)) = entry.split_once('-') {
-            let start_page: u32 = start
-                .trim()
-                .parse()
-                .with_context(|| format!("invalid page in range: {entry}"))?;
-            let end_page: u32 = end
-                .trim()
-                .parse()
-                .with_context(|| format!("invalid page in range: {entry}"))?;
-            let range = PageRange::new(start_page, end_page)?;
-            if trimmed.split(',').count() == 1 {
-                parsed_range = Some(range);
-            } else {
-                for page in range.start()..=range.end() {
-                    explicit_pages.push(page);
-                }
-            }
-        } else {
-            let page: u32 = entry
-                .parse()
-                .with_context(|| format!("invalid page entry: {entry}"))?;
-            explicit_pages.push(page);
-        }
-    }
-
-    if let Some(range) = parsed_range {
-        return Ok(PageSelection::Range(range));
-    }
-
-    if explicit_pages.is_empty() {
-        bail!("--pages produced an empty selection");
-    }
-
-    Ok(PageSelection::from_pages(explicit_pages)?)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        PageSelection, extraction_output_stem, parse_pages_spec, plan_output_paths,
-        read_input_with_limit,
-    };
+    use super::{extraction_output_stem, plan_output_paths, read_input_with_limit};
     use std::io::Write;
     use std::path::Path;
-
-    #[test]
-    fn pages_spec_all_defaults() {
-        let selection = parse_pages_spec(None);
-        assert!(selection.is_ok());
-
-        let Ok(selection) = selection else { return };
-        assert!(matches!(selection, PageSelection::All));
-    }
-
-    #[test]
-    fn pages_spec_range_parses() {
-        let selection = parse_pages_spec(Some("2-5"));
-        assert!(selection.is_ok());
-
-        let Ok(selection) = selection else { return };
-        assert!(matches!(selection, PageSelection::Range(_)));
-    }
-
-    #[test]
-    fn pages_spec_list_parses_to_explicit() {
-        let selection = parse_pages_spec(Some("3,1,3,2"));
-        assert!(selection.is_ok());
-
-        let Ok(selection) = selection else { return };
-        assert!(matches!(selection, PageSelection::Explicit(_)));
-    }
 
     #[test]
     fn output_stems_are_stable_across_clone_paths() {

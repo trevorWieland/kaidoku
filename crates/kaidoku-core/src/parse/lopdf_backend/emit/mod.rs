@@ -51,6 +51,7 @@ pub(super) struct EmitContext<'a> {
     font_catalog: &'a FontCatalog<'a>,
     font_registry: FontRegistryAccess<'a>,
     max_elements_per_page: u32,
+    control: &'a ExtractionControl,
     out: &'a mut Vec<RawElement>,
 }
 
@@ -68,7 +69,7 @@ pub(super) struct ExtractionLimits {
 pub(super) struct PageEmitConfig<'a> {
     pub(super) coordinate_precision: u8,
     pub(super) page_geometry: PageGeometry,
-    pub(super) root_scope: &'a ResourceScope,
+    pub(super) root_scope: &'a Arc<ResourceScope>,
     pub(super) limits: ExtractionLimits,
     pub(super) control: &'a ExtractionControl,
 }
@@ -142,6 +143,10 @@ impl FormTraversal {
 impl EmitContext<'_> {
     pub(super) const fn page_number(&self) -> PageNumber {
         self.page_number
+    }
+
+    pub(super) const fn control(&self) -> &ExtractionControl {
+        self.control
     }
 
     pub(super) fn intern_font_id(
@@ -276,6 +281,7 @@ pub(super) fn extract_page_elements(
         font_catalog: &font_catalog,
         font_registry,
         max_elements_per_page: config.limits.max_elements,
+        control: config.control,
         out: &mut elements,
     };
 
@@ -331,7 +337,7 @@ pub(super) fn extract_page_elements(
 
 fn process_stream(
     stream: &Stream,
-    scope: &ResourceScope,
+    scope: &Arc<ResourceScope>,
     text_state: &mut TextState,
     graphics_state: &mut GraphicsState,
     emit: &mut EmitContext<'_>,
@@ -437,11 +443,26 @@ pub(super) fn prepopulate_font_registry(
     Ok(())
 }
 
-pub(super) fn object_to_f64(value: &Object) -> Result<f64, ExtractError> {
-    value
-        .as_float()
-        .map(f64::from)
+/// Single numeric boundary between lopdf and kaidoku.
+///
+/// lopdf stores PDF `Real` tokens as `f32`. This helper widens that to `f64`
+/// **once**. Integer operands route through a narrowing `i32` conversion
+/// first, which is lossless for any value that f64 can represent exactly;
+/// operands outside `i32` range are rejected as adversarial rather than
+/// silently losing precision via `i64 as f64`. All matrix/geometry/text-state
+/// arithmetic downstream is pure `f64`; quantization happens only at the
+/// final emission boundary (`PageGeometry::normalize_bbox`).
+pub(crate) fn object_to_f64(value: &Object) -> Result<f64, ExtractError> {
+    if let Ok(real) = value.as_float() {
+        return Ok(f64::from(real));
+    }
+    let integer = value
+        .as_i64()
         .map_err(|error| ExtractError::ContentDecode {
             reason: error.to_string(),
-        })
+        })?;
+    let narrow = i32::try_from(integer).map_err(|_| ExtractError::ContentDecode {
+        reason: format!("integer operand {integer} is outside the exact-f64 range"),
+    })?;
+    Ok(f64::from(narrow))
 }

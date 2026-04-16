@@ -48,7 +48,7 @@ fn compressed_stream_limit_is_enforced_during_decode() {
 
     let page_number = PageNumber::new(1).expect("page number");
     let geometry = page_geometry(&document, page_number, page_id, 32).expect("geometry");
-    let scope = page_resource_scope(&document, page_id).expect("scope");
+    let scope = std::sync::Arc::new(page_resource_scope(&document, page_id).expect("scope"));
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
     let decoded_budget = DecodedBudget::new(10_000_000);
@@ -115,7 +115,7 @@ fn cumulative_decoded_stream_budget_is_enforced() {
 
     let page_number = PageNumber::new(1).expect("page number");
     let geometry = page_geometry(&document, page_number, page_id, 32).expect("geometry");
-    let scope = page_resource_scope(&document, page_id).expect("scope");
+    let scope = std::sync::Arc::new(page_resource_scope(&document, page_id).expect("scope"));
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
     let decoded_budget = DecodedBudget::new(200);

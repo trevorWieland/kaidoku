@@ -5,6 +5,11 @@ use lopdf::{Object, Stream};
 use std::io::Read;
 use weezl::{BitOrder, LzwStatus, decode::Decoder as LzwDecoder};
 
+mod ascii85;
+mod predictor;
+use ascii85::decode_ascii85_bounded;
+use predictor::{PredictorParams, apply_predictor};
+
 pub(crate) fn decode_content_stream_bounded(
     stream: &Stream,
     page_number: PageNumber,
@@ -39,15 +44,22 @@ pub(crate) fn decode_content_stream_bounded(
     let decode_params = stream.dict.get(b"DecodeParms").ok();
     let mut current = stream.content.clone();
 
-    for (index, filter) in filters.iter().enumerate() {
+    for (index, filter_name) in filters.iter().enumerate() {
         control.checkpoint(
             ExtractionStage::DecodeContentStreamFilter,
             Some(page_number),
         )?;
 
+        let filter_id =
+            FilterId::from_name(filter_name).ok_or_else(|| ExtractError::ContentDecode {
+                reason: format!(
+                    "unsupported content stream filter {}",
+                    String::from_utf8_lossy(filter_name)
+                ),
+            })?;
         let params = decode_params.and_then(|value| decode_params_for_filter(value, index));
         current = decode_filter_bounded(
-            filter,
+            filter_id,
             &current,
             params,
             page_number,
@@ -69,7 +81,7 @@ fn decode_params_for_filter(value: &Object, index: usize) -> Option<&lopdf::Dict
 }
 
 fn decode_filter_bounded(
-    filter: &[u8],
+    filter: FilterId,
     input: &[u8],
     decode_params: Option<&lopdf::Dictionary>,
     page_number: PageNumber,
@@ -77,46 +89,54 @@ fn decode_filter_bounded(
     limit: usize,
     control: &ExtractionControl,
 ) -> Result<Vec<u8>, ExtractError> {
-    if predictor_value(decode_params).unwrap_or(1) > 1 {
-        return Err(ExtractError::ContentDecode {
-            reason: "DecodeParms Predictor is not supported for content streams".to_string(),
-        });
-    }
-
-    match filter {
-        b"FlateDecode" | b"Fl" => {
-            decode_zlib_bounded(input, page_number, stream_index, limit, control)
-        }
-        b"LZWDecode" | b"LZW" => decode_lzw_bounded(
+    let decoded = match filter {
+        FilterId::Flate => decode_zlib_bounded(input, page_number, stream_index, limit, control)?,
+        FilterId::Lzw => decode_lzw_bounded(
             input,
             decode_params,
             page_number,
             stream_index,
             limit,
             control,
-        ),
-        b"ASCII85Decode" | b"A85" => {
-            decode_ascii85_bounded(input, page_number, stream_index, limit, control)
+        )?,
+        FilterId::Ascii85 => {
+            decode_ascii85_bounded(input, page_number, stream_index, limit, control)?
         }
-        b"ASCIIHexDecode" | b"AHx" => {
-            decode_ascii_hex_bounded(input, page_number, stream_index, limit, control)
+        FilterId::AsciiHex => {
+            decode_ascii_hex_bounded(input, page_number, stream_index, limit, control)?
         }
-        b"RunLengthDecode" | b"RL" => {
-            decode_run_length_bounded(input, page_number, stream_index, limit, control)
+        FilterId::RunLength => {
+            decode_run_length_bounded(input, page_number, stream_index, limit, control)?
         }
-        _ => Err(ExtractError::ContentDecode {
-            reason: format!(
-                "unsupported content stream filter {}",
-                String::from_utf8_lossy(filter)
-            ),
-        }),
+    };
+
+    let params = PredictorParams::from_dict(decode_params);
+    if !params.is_identity() {
+        return apply_predictor(&decoded, params, page_number, stream_index, limit, control);
     }
+    Ok(decoded)
 }
 
-fn predictor_value(params: Option<&lopdf::Dictionary>) -> Option<i64> {
-    params
-        .and_then(|dict| dict.get(b"Predictor").ok())
-        .and_then(|value| value.as_i64().ok())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FilterId {
+    Flate,
+    Lzw,
+    Ascii85,
+    AsciiHex,
+    RunLength,
+}
+
+impl FilterId {
+    pub(super) fn from_name(name: &[u8]) -> Option<Self> {
+        match name {
+            b"FlateDecode" | b"Fl" => Some(Self::Flate),
+            b"LZWDecode" | b"LZW" => Some(Self::Lzw),
+            b"ASCII85Decode" | b"A85" => Some(Self::Ascii85),
+            b"ASCIIHexDecode" | b"AHx" => Some(Self::AsciiHex),
+            b"RunLengthDecode" | b"RL" => Some(Self::RunLength),
+            _ => None,
+        }
+    }
 }
 
 fn decode_zlib_bounded(
@@ -216,90 +236,6 @@ fn decode_lzw_bounded(
                 reason: "LZW decoder made no progress".to_string(),
             });
         }
-    }
-
-    Ok(output)
-}
-
-fn decode_ascii85_bounded(
-    input: &[u8],
-    page_number: PageNumber,
-    stream_index: u32,
-    limit: usize,
-    control: &ExtractionControl,
-) -> Result<Vec<u8>, ExtractError> {
-    let mut output = Vec::new();
-    let mut buffer: u32 = 0;
-    let mut count = 0u8;
-
-    let input_no_eod = if input.len() >= 2 && &input[input.len() - 2..] == b"~>" {
-        &input[..input.len() - 2]
-    } else {
-        input
-    };
-
-    for &character in input_no_eod {
-        control.checkpoint(ExtractionStage::DecodeAscii85, Some(page_number))?;
-
-        if character == b'z' {
-            if count != 0 {
-                return Err(ExtractError::ContentDecode {
-                    reason: "invalid ASCII85 stream".to_string(),
-                });
-            }
-            push_with_limit(&mut output, &[0, 0, 0, 0], limit, page_number, stream_index)?;
-            continue;
-        }
-
-        if character.is_ascii_whitespace() {
-            continue;
-        }
-
-        if !(b'!'..=b'u').contains(&character) {
-            break;
-        }
-
-        buffer = buffer
-            .checked_mul(85)
-            .and_then(|value| value.checked_add(u32::from(character - b'!')))
-            .ok_or(ExtractError::ContentDecode {
-                reason: "ASCII85 overflow".to_string(),
-            })?;
-
-        count = count.saturating_add(1);
-
-        if count == 5 {
-            push_with_limit(
-                &mut output,
-                &buffer.to_be_bytes(),
-                limit,
-                page_number,
-                stream_index,
-            )?;
-            buffer = 0;
-            count = 0;
-        }
-    }
-
-    if count > 0 {
-        for _ in count..5 {
-            buffer = buffer
-                .checked_mul(85)
-                .and_then(|value| value.checked_add(84))
-                .ok_or(ExtractError::ContentDecode {
-                    reason: "ASCII85 tail overflow".to_string(),
-                })?;
-        }
-
-        let bytes = buffer.to_be_bytes();
-        let take = usize::from(count.saturating_sub(1));
-        push_with_limit(
-            &mut output,
-            &bytes[..take],
-            limit,
-            page_number,
-            stream_index,
-        )?;
     }
 
     Ok(output)

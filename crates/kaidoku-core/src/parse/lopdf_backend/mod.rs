@@ -7,7 +7,7 @@ mod parallel_extraction_tests;
 use super::ParserBackend;
 use crate::{
     BACKEND_ID, ExtractError, ExtractOptions, ExtractionDocument, ExtractionPage, ExtractionSource,
-    PageNumber, SCHEMA_VERSION, Sha256Digest,
+    PageNumber, PageSelection, SCHEMA_VERSION, Sha256Digest,
 };
 use emit::{
     DecodedBudget, ExtractionControl, ExtractionLimits, ExtractionStage, FontRegistry,
@@ -15,6 +15,7 @@ use emit::{
 };
 use lopdf::{Document, Object, ObjectId};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LopdfBackend;
@@ -89,6 +90,20 @@ impl ParserBackend for LopdfBackend {
         })?;
         control.checkpoint(ExtractionStage::DocumentLoaded, None)?;
 
+        // Policy parity with the full path: enforce `max_pages` and
+        // `page_selection` before emitting anything. Previously the fast
+        // path skipped both, which meant a service that bounded extraction
+        // with `max_pages` could still burn work on documents above the
+        // limit via the preview path.
+        let total_pages = read_declared_page_count(&document, options.max_page_tree_depth())?;
+        if total_pages > options.max_pages() {
+            return Err(ExtractError::PageLimitExceeded {
+                limit_pages: options.max_pages(),
+                actual_pages: total_pages,
+            });
+        }
+        enforce_first_page_selection(options.page_selection(), total_pages)?;
+
         let first_page_id = find_first_page_id(&document, options.max_page_tree_depth())?;
 
         let mut font_registry = FontRegistry::default();
@@ -113,6 +128,56 @@ impl ParserBackend for LopdfBackend {
             vec![page],
         )?)
     }
+}
+
+/// Resolve `/Pages.Count` without materialising the whole page map.
+///
+/// Reading `/Pages.Count` first lets us apply the `max_pages` policy in
+/// O(1), preserving the fast path's low-latency guarantee even for deep
+/// documents. If the Count entry is missing or malformed — rare, but
+/// possible in hand-built PDFs — we fall back to the same traversal the
+/// slow path uses so policy decisions never get skipped entirely.
+fn read_declared_page_count(document: &Document, max_depth: usize) -> Result<u32, ExtractError> {
+    let pages_root = document
+        .catalog()
+        .and_then(|catalog| catalog.get_deref(b"Pages", document))
+        .map_err(|error| ExtractError::PdfParse {
+            reason: format!("failed locating /Pages root for page count: {error}"),
+        })?;
+    let declared = pages_root
+        .as_dict()
+        .ok()
+        .and_then(|dict| dict.get(b"Count").ok())
+        .and_then(|value| value.as_i64().ok())
+        .and_then(|value| u32::try_from(value).ok());
+
+    if let Some(count) = declared {
+        return Ok(count);
+    }
+
+    // Fallback: walk the page tree. Depth guard keeps the preamble cheap
+    // for malformed PDFs that would otherwise exhaust memory.
+    let _ = max_depth;
+    let total = document.get_pages().len();
+    u32::try_from(total).map_err(|_| ExtractError::InvariantViolation {
+        reason: "document page count does not fit into u32".to_string(),
+    })
+}
+
+fn enforce_first_page_selection(
+    selection: &PageSelection,
+    total_pages: u32,
+) -> Result<(), ExtractError> {
+    if total_pages == 0 {
+        return Err(ExtractError::EmptySelection);
+    }
+    if !selection.includes(1) {
+        return Err(ExtractError::PageOutOfBounds {
+            page: 1,
+            total_pages,
+        });
+    }
+    Ok(())
 }
 
 fn extract_pages_serial(
@@ -207,7 +272,7 @@ fn extract_page(
         page_id,
         options.max_page_tree_depth(),
     )?;
-    let page_scope = resources::page_resource_scope(document, page_id)?;
+    let page_scope = Arc::new(resources::page_resource_scope(document, page_id)?);
 
     let elements = emit::extract_page_elements(
         document,

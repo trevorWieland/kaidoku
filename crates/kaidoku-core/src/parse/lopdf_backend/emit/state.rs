@@ -1,5 +1,7 @@
 use super::matrix::Matrix;
 
+const DEFAULT_FONT_SIZE: f64 = 12.0;
+
 #[derive(Debug, Clone)]
 pub(super) struct TextState {
     text_matrix: Matrix,
@@ -10,7 +12,14 @@ pub(super) struct TextState {
     h_scaling: f64,
     rise: f64,
     font_key: Option<Vec<u8>>,
-    font_size: f64,
+    /// Current font size in points.
+    ///
+    /// Stored as `Option<f64>` so that malformed producer behaviour (e.g.
+    /// `Tf /F1 0 Tf`, `NaN`, or negative zero) marks the state as
+    /// text-emission-disabled rather than propagating a non-positive value
+    /// into `PositiveFinite`, which would abort the whole extraction. Callers
+    /// consult [`font_size_valid`] before emitting glyphs.
+    font_size: Option<f64>,
 }
 
 impl Default for TextState {
@@ -24,7 +33,7 @@ impl Default for TextState {
             h_scaling: 100.0,
             rise: 0.0,
             font_key: None,
-            font_size: 12.0,
+            font_size: Some(DEFAULT_FONT_SIZE),
         }
     }
 }
@@ -37,7 +46,15 @@ impl TextState {
 
     pub(super) fn set_font(&mut self, key: Option<Vec<u8>>, size: f64) {
         self.font_key = key;
-        self.font_size = size.abs();
+        // Zero, negative, NaN, and ±∞ font sizes are producer defects rather
+        // than fatal content — treat them as "text emission disabled" so a
+        // broken Tf operator does not abort the entire document. Emission
+        // sites check `font_size_valid()` before touching this field.
+        self.font_size = if size.is_finite() && size.abs() > 0.0 {
+            Some(size.abs())
+        } else {
+            None
+        };
     }
 
     pub(super) fn set_char_spacing(&mut self, char_spacing: f64) {
@@ -83,7 +100,7 @@ impl TextState {
     }
 
     pub(super) fn apply_tj_adjustment(&mut self, adjustment: f64) {
-        let tx = -(adjustment / 1000.0) * self.font_size * self.horizontal_scale_factor();
+        let tx = -(adjustment / 1000.0) * self.font_size() * self.horizontal_scale_factor();
         self.advance_text(tx);
     }
 
@@ -94,7 +111,7 @@ impl TextState {
             .concatenate(Matrix::translation(0.0, self.rise));
         ctm.concatenate(text_space).concatenate(Matrix::scale(
             glyph_width.max(f64::EPSILON),
-            self.font_size.max(f64::EPSILON),
+            self.font_size().max(f64::EPSILON),
         ))
     }
 
@@ -108,7 +125,12 @@ impl TextState {
 
     #[must_use]
     pub(super) fn font_size(&self) -> f64 {
-        self.font_size
+        self.font_size.unwrap_or(DEFAULT_FONT_SIZE)
+    }
+
+    #[must_use]
+    pub(super) fn font_size_valid(&self) -> bool {
+        self.font_size.is_some()
     }
 
     #[must_use]

@@ -1,3 +1,4 @@
+use super::emit::object_to_f64;
 use crate::{BBox, ExtractError, PageNumber};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream};
 use std::collections::{HashMap, HashSet};
@@ -35,13 +36,17 @@ impl ResourceScope {
         }
     }
 
-    fn with_parent(
+    /// Build a child scope that shares its parent chain via `Arc::clone` — no
+    /// deep clone of the parent `HashMap`. Previously the parent was always
+    /// re-wrapped in a fresh `Arc`, which allocated on every form-XObject
+    /// recursion step and copied the whole scope chain on deep forms.
+    fn with_parent_arc(
         local_xobjects: Arc<HashMap<Vec<u8>, ObjectId>>,
-        parent: &ResourceScope,
+        parent: Arc<ResourceScope>,
     ) -> Self {
         Self {
             local_xobjects,
-            parent: Some(Arc::new(parent.clone())),
+            parent: Some(parent),
         }
     }
 }
@@ -56,6 +61,11 @@ pub(crate) struct PageGeometry {
 }
 
 impl PageGeometry {
+    /// Normalize a device-space bbox into page-space and quantize once at the
+    /// emission boundary. All upstream arithmetic (CTM concatenation, text
+    /// advances, ligature widths) must be pure f64 — this function is the
+    /// only place that rounds to `coordinate_precision`. Quantizing earlier
+    /// would accumulate rounding error across matrix concatenations.
     pub(crate) fn normalize_bbox(
         self,
         bbox: BBox,
@@ -145,11 +155,11 @@ pub(super) fn page_resource_scope(
 
 pub(super) fn form_resource_scope(
     document: &Document,
-    parent: &ResourceScope,
+    parent: Arc<ResourceScope>,
     form_object_id: ObjectId,
     form_stream: &Stream,
     local_cache: &mut HashMap<ObjectId, Arc<HashMap<Vec<u8>, ObjectId>>>,
-) -> ResourceScope {
+) -> Arc<ResourceScope> {
     let local = if let Some(cached) = local_cache.get(&form_object_id) {
         Arc::clone(cached)
     } else {
@@ -164,7 +174,7 @@ pub(super) fn form_resource_scope(
         computed
     };
 
-    ResourceScope::with_parent(local, parent)
+    Arc::new(ResourceScope::with_parent_arc(local, parent))
 }
 
 pub(super) fn image_metadata_for_object(
@@ -223,7 +233,7 @@ pub(super) fn form_matrix(stream: &Stream) -> Option<[f64; 6]> {
 
     let mut values = [0.0_f64; 6];
     for (index, value) in matrix.iter().enumerate() {
-        values[index] = f64::from(object_to_f32(value).ok()?);
+        values[index] = object_to_f64(value).ok()?;
     }
 
     Some(values)
@@ -386,7 +396,7 @@ fn parse_box_array(value: &Object) -> Option<[f64; 4]> {
 
     let mut values = [0.0_f64; 4];
     for (index, value) in array.iter().enumerate() {
-        values[index] = f64::from(object_to_f32(value).ok()?);
+        values[index] = object_to_f64(value).ok()?;
     }
 
     let min_x = values[0].min(values[2]);
@@ -441,14 +451,6 @@ fn extract_color_space(value: &Object) -> Option<String> {
             .map(|name| String::from_utf8_lossy(name).to_string()),
         _ => None,
     }
-}
-
-fn object_to_f32(value: &Object) -> Result<f32, ExtractError> {
-    value
-        .as_float()
-        .map_err(|error| ExtractError::ContentDecode {
-            reason: error.to_string(),
-        })
 }
 
 #[cfg(test)]

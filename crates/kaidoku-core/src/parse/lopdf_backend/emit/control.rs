@@ -23,8 +23,10 @@ pub(crate) enum ExtractionStage {
     DecodeAscii85,
     DecodeAsciiHex,
     DecodeRunLength,
+    DecodePredictor,
     ContentParseOperation,
     ContentParseToken,
+    TextSkippedInvalidFontSize,
 }
 
 impl ExtractionStage {
@@ -48,8 +50,10 @@ impl ExtractionStage {
             Self::DecodeAscii85 => "decode_ascii85",
             Self::DecodeAsciiHex => "decode_ascii_hex",
             Self::DecodeRunLength => "decode_run_length",
+            Self::DecodePredictor => "decode_predictor",
             Self::ContentParseOperation => "content_parse_operation",
             Self::ContentParseToken => "content_parse_token",
+            Self::TextSkippedInvalidFontSize => "text_skipped_invalid_font_size",
         }
     }
 }

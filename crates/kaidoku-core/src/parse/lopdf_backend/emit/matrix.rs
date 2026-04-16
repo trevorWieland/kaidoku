@@ -1,3 +1,4 @@
+use super::object_to_f64;
 use crate::ExtractError;
 use lopdf::Object;
 
@@ -51,13 +52,16 @@ impl Matrix {
                 reason: "matrix operator requires 6 operands".to_string(),
             });
         }
+        // Full f64 pipeline: widen through the crate-wide object_to_f64 helper,
+        // which preserves integer-operand precision and does not re-cast
+        // through f32 above the lopdf boundary.
         Ok(Self {
-            a: f64::from(object_to_f32(&operands[0])?),
-            b: f64::from(object_to_f32(&operands[1])?),
-            c: f64::from(object_to_f32(&operands[2])?),
-            d: f64::from(object_to_f32(&operands[3])?),
-            e: f64::from(object_to_f32(&operands[4])?),
-            f: f64::from(object_to_f32(&operands[5])?),
+            a: object_to_f64(&operands[0])?,
+            b: object_to_f64(&operands[1])?,
+            c: object_to_f64(&operands[2])?,
+            d: object_to_f64(&operands[3])?,
+            e: object_to_f64(&operands[4])?,
+            f: object_to_f64(&operands[5])?,
         })
     }
 
@@ -112,12 +116,4 @@ impl Matrix {
             (self.b * x) + (self.d * y) + self.f,
         )
     }
-}
-
-fn object_to_f32(value: &Object) -> Result<f32, ExtractError> {
-    value
-        .as_float()
-        .map_err(|error| ExtractError::ContentDecode {
-            reason: error.to_string(),
-        })
 }

@@ -57,6 +57,11 @@ struct Phase1BenchCommand {
     baseline: PathBuf,
     #[arg(long, default_value_t = false)]
     check: bool,
+    /// Require exact `runner_class` match. Without this flag (and without
+    /// `KAIDOKU_BENCH_STRICT=1`), the gate falls back to the coarser
+    /// `compat_class` (os-arch-profile) when the strict class is absent.
+    #[arg(long, default_value_t = false)]
+    strict: bool,
 }
 
 fn main() -> Result<()> {

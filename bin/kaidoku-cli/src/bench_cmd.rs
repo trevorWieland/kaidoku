@@ -7,13 +7,17 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+mod baseline_store;
 mod environment;
 mod regression;
 mod stats;
+#[cfg(test)]
+use baseline_store::validate_required_runner_classes;
+use baseline_store::{load_bench_baseline_store, write_bench_report};
 use environment::benchmark_environment;
 use stats::{bytes_to_mib, mad, median, round_metric};
 
-const BENCH_SCHEMA_VERSION: &str = "kaidoku.phase1.bench.v4";
+const BENCH_SCHEMA_VERSION: &str = "kaidoku.phase1.bench.v5";
 const THROUGHPUT_MAX_REGRESSION_RATIO: f64 = 0.15;
 const LATENCY_MAX_REGRESSION_RATIO: f64 = 0.15;
 const NOISE_SIGMA_MULTIPLIER: f64 = 2.0;
@@ -60,7 +64,19 @@ struct BenchReport {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct BenchEnvironment {
     generated_at_unix_seconds: u64,
+    /// Fine-grained CI-gate class: OS + arch + profile + CPU-tier + rustc-minor.
     runner_class: String,
+    /// Coarse compatibility class: OS + arch + profile only.
+    ///
+    /// Defaulted to empty on `v4` baselines; the store loader backfills it on
+    /// first read so historical `v4` files deserialize cleanly.
+    #[serde(default)]
+    compat_class: String,
+    /// Which rule selected the baseline used for comparison. Recorded in the
+    /// CURRENT report only (never in the baseline store itself) so CI logs
+    /// show whether a strict or compat match was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    class_match: Option<String>,
     os: String,
     arch: String,
     cpu_logical_cores: usize,
@@ -166,14 +182,79 @@ fn run_phase1_bench(command: &Phase1BenchCommand) -> Result<()> {
     write_bench_report(&command.output, &report)?;
 
     if command.check {
-        let baseline = load_bench_report_for_runner_class(
+        let strict = bench_strict_mode(command.strict);
+        let (baseline, match_kind) = load_baseline_with_fallback(
             &command.baseline,
             &report.environment.runner_class,
+            &report.environment.compat_class,
+            strict,
         )?;
         regression::check_bench_regression(&baseline, &report)?;
+
+        // Persist the resolved match kind into the current report so CI logs
+        // and human review can see whether strict or compat matching landed.
+        let mut report_with_match = report;
+        report_with_match.environment.class_match = Some(match_kind);
+        write_bench_report(&command.output, &report_with_match)?;
     }
 
     Ok(())
+}
+
+fn bench_strict_mode(cli_flag: bool) -> bool {
+    if cli_flag {
+        return true;
+    }
+    std::env::var("KAIDOKU_BENCH_STRICT")
+        .ok()
+        .is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+fn load_baseline_with_fallback(
+    path: &Path,
+    runner_class: &str,
+    compat_class: &str,
+    strict: bool,
+) -> Result<(BenchReport, String)> {
+    let store = load_bench_baseline_store(path)?;
+
+    if let Some(report) = store
+        .reports
+        .iter()
+        .find(|candidate| candidate.environment.runner_class == runner_class)
+    {
+        return Ok((report.clone(), format!("strict:{runner_class}")));
+    }
+
+    if strict {
+        let available = store
+            .reports
+            .iter()
+            .map(|report| report.environment.runner_class.clone())
+            .collect::<Vec<_>>();
+        bail!(
+            "benchmark baseline {} is missing runner class `{}` and strict mode is on; \
+             available classes: [{}]. Seed this class with `just phase1-bench-refresh`.",
+            path.display(),
+            runner_class,
+            available.join(", "),
+        );
+    }
+
+    if let Some(report) = store.reports.iter().find(|candidate| {
+        !candidate.environment.compat_class.is_empty()
+            && candidate.environment.compat_class == compat_class
+    }) {
+        return Ok((report.clone(), format!("compat:{compat_class}")));
+    }
+
+    bail!(
+        "benchmark baseline {} has no entry matching runner_class `{}` or compat_class `{}`; \
+         seed one via `just phase1-bench-refresh`.",
+        path.display(),
+        runner_class,
+        compat_class,
+    )
 }
 
 fn benchmark_runtime_calibration(
@@ -353,136 +434,6 @@ fn validate_required_fixture_set(actual: &BTreeSet<String>) -> Result<()> {
         missing.join(", "),
         extra.join(", ")
     );
-}
-
-fn write_bench_report(path: &Path, report: &BenchReport) -> Result<()> {
-    if is_baseline_path(path) {
-        let mut store = if path.exists() {
-            load_bench_baseline_store(path).unwrap_or(BenchBaselineStore {
-                schema_version: BENCH_SCHEMA_VERSION.to_string(),
-                reports: Vec::new(),
-            })
-        } else {
-            BenchBaselineStore {
-                schema_version: BENCH_SCHEMA_VERSION.to_string(),
-                reports: Vec::new(),
-            }
-        };
-
-        if store.schema_version != BENCH_SCHEMA_VERSION {
-            store = BenchBaselineStore {
-                schema_version: BENCH_SCHEMA_VERSION.to_string(),
-                reports: Vec::new(),
-            };
-        }
-
-        if let Some(existing) = store
-            .reports
-            .iter_mut()
-            .find(|candidate| candidate.environment.runner_class == report.environment.runner_class)
-        {
-            *existing = report.clone();
-        } else {
-            store.reports.push(report.clone());
-            store.reports.sort_by(|left, right| {
-                left.environment
-                    .runner_class
-                    .cmp(&right.environment.runner_class)
-            });
-        }
-
-        let mut serialized = serde_json::to_string_pretty(&store)?;
-        serialized.push('\n');
-        fs::write(path, serialized)
-            .with_context(|| format!("failed writing benchmark report {}", path.display()))?;
-        return Ok(());
-    }
-
-    let mut serialized = serde_json::to_string_pretty(report)?;
-    serialized.push('\n');
-    fs::write(path, serialized)
-        .with_context(|| format!("failed writing benchmark report {}", path.display()))?;
-    Ok(())
-}
-
-fn load_bench_report_for_runner_class(path: &Path, runner_class: &str) -> Result<BenchReport> {
-    let store = load_bench_baseline_store(path)?;
-    let available_classes = store
-        .reports
-        .iter()
-        .map(|report| report.environment.runner_class.clone())
-        .collect::<Vec<_>>();
-    store
-        .reports
-        .into_iter()
-        .find(|report| report.environment.runner_class == runner_class)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "benchmark baseline {} is missing runner class `{}`; available classes: [{}]",
-                path.display(),
-                runner_class,
-                available_classes.join(", "),
-            )
-        })
-}
-
-fn load_bench_baseline_store(path: &Path) -> Result<BenchBaselineStore> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("failed reading baseline benchmark {}", path.display()))?;
-
-    let store = if let Ok(store) = serde_json::from_str::<BenchBaselineStore>(&content) {
-        if store.schema_version != BENCH_SCHEMA_VERSION {
-            bail!(
-                "unexpected benchmark schema {} in {}",
-                store.schema_version,
-                path.display(),
-            );
-        }
-        store
-    } else {
-        let report: BenchReport = serde_json::from_str(&content)
-            .with_context(|| format!("failed parsing baseline benchmark {}", path.display()))?;
-        if report.schema_version != BENCH_SCHEMA_VERSION {
-            bail!(
-                "unexpected benchmark schema {} in {}",
-                report.schema_version,
-                path.display(),
-            );
-        }
-        BenchBaselineStore {
-            schema_version: BENCH_SCHEMA_VERSION.to_string(),
-            reports: vec![report],
-        }
-    };
-
-    validate_required_runner_classes(&store, path)?;
-    Ok(store)
-}
-
-fn validate_required_runner_classes(store: &BenchBaselineStore, path: &Path) -> Result<()> {
-    let present = store
-        .reports
-        .iter()
-        .map(|report| report.environment.runner_class.as_str())
-        .collect::<BTreeSet<_>>();
-    let missing = REQUIRED_BASELINE_RUNNER_CLASSES
-        .iter()
-        .copied()
-        .filter(|class| !present.contains(class))
-        .collect::<Vec<_>>();
-    if missing.is_empty() {
-        return Ok(());
-    }
-    bail!(
-        "benchmark baseline {} is missing required runner class(es): [{}]. Seed them with \
-         `just phase1-bench-refresh` on the corresponding runner.",
-        path.display(),
-        missing.join(", ")
-    );
-}
-
-fn is_baseline_path(path: &Path) -> bool {
-    path.file_name() == Some(OsStr::new("benchmarks.baseline.json"))
 }
 
 #[cfg(test)]

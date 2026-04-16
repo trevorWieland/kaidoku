@@ -20,6 +20,8 @@ pub(super) fn benchmark_environment() -> BenchEnvironment {
             .ok()
             .map_or(0, |duration| duration.as_secs()),
         runner_class: runner_class(&os, &arch, &profile, cpu_logical_cores, &rustc_version),
+        compat_class: compat_class(&os, &arch, &profile),
+        class_match: None,
         os,
         arch,
         cpu_logical_cores,
@@ -42,6 +44,17 @@ pub(super) fn runner_class(
         cpu_core_tier(cpu_logical_cores),
         rustc_track(rustc_version),
     )
+}
+
+/// Coarse hardware-architecture compatibility class.
+///
+/// Unlike [`runner_class`], which pins CPU-core tier *and* rustc minor, the
+/// compat class captures only architecture-identity. Two macOS aarch64
+/// machines with different rustc minor or different CPU tier share a compat
+/// class — enough identity for sanity-checking that the baseline comes from
+/// the same ABI, loose enough that rustc patch bumps do not invalidate it.
+pub(super) fn compat_class(os: &str, arch: &str, profile: &str) -> String {
+    format!("{os}-{arch}-{profile}")
 }
 
 pub(super) fn cpu_core_tier(cpu_logical_cores: usize) -> &'static str {

@@ -32,6 +32,8 @@ pub enum ValidationError {
         "extraction document references font id {font_id} on page {page_number} but the font is not registered"
     )]
     UnknownFontReference { font_id: u32, page_number: u32 },
+    #[error("glyph_component_count must be >= 1")]
+    InvalidGlyphComponentCount,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
