@@ -1,5 +1,6 @@
 use super::{
-    ExtractionControl, ExtractionLimits, FontRegistry, PageEmitConfig, extract_page_elements,
+    DecodedBudget, ExtractionControl, ExtractionLimits, FontRegistry, FontRegistryAccess,
+    PageEmitConfig, extract_page_elements,
 };
 use crate::PageNumber;
 use crate::parse::lopdf_backend::resources::{page_geometry, page_resource_scope};
@@ -21,7 +22,7 @@ fn tj_elements_have_unique_source_ref_indices() {
     let Ok(scope) = scope else { return };
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
-    let mut remaining_budget = 10_000_000;
+    let decoded_budget = DecodedBudget::new(10_000_000);
 
     let elements = extract_page_elements(
         &document,
@@ -35,15 +36,14 @@ fn tj_elements_have_unique_source_ref_indices() {
                 operation_budget: 10_000,
                 max_elements: 10_000,
                 stream_byte_limit: 1_000_000,
-                total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
                 max_content_nesting_depth: 128,
             },
             control: &control,
         },
-        &mut font_registry,
-        &mut remaining_budget,
+        FontRegistryAccess::Mutable(&mut font_registry),
+        &decoded_budget,
     );
     assert!(
         elements.is_ok(),
@@ -81,7 +81,7 @@ fn text_state_persists_across_stream_boundaries() {
     let Ok(scope) = scope else { return };
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
-    let mut remaining_budget = 10_000_000;
+    let decoded_budget = DecodedBudget::new(10_000_000);
 
     let elements = extract_page_elements(
         &document,
@@ -95,15 +95,14 @@ fn text_state_persists_across_stream_boundaries() {
                 operation_budget: 10_000,
                 max_elements: 10_000,
                 stream_byte_limit: 1_000_000,
-                total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
                 max_content_nesting_depth: 128,
             },
             control: &control,
         },
-        &mut font_registry,
-        &mut remaining_budget,
+        FontRegistryAccess::Mutable(&mut font_registry),
+        &decoded_budget,
     );
     assert!(
         elements.is_ok(),
@@ -139,7 +138,7 @@ fn inline_image_bi_emits_image_element() {
     let scope = page_resource_scope(&document, page_id).expect("scope");
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
-    let mut remaining_budget = 10_000_000;
+    let decoded_budget = DecodedBudget::new(10_000_000);
 
     let elements = extract_page_elements(
         &document,
@@ -153,15 +152,14 @@ fn inline_image_bi_emits_image_element() {
                 operation_budget: 10_000,
                 max_elements: 10_000,
                 stream_byte_limit: 1_000_000,
-                total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
                 max_content_nesting_depth: 128,
             },
             control: &control,
         },
-        &mut font_registry,
-        &mut remaining_budget,
+        FontRegistryAccess::Mutable(&mut font_registry),
+        &decoded_budget,
     )
     .expect("extract");
 
@@ -250,7 +248,7 @@ fn form_xobject_recursion_emits_nested_image() {
     let scope = page_resource_scope(&document, page_id).expect("scope");
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
-    let mut remaining_budget = 10_000_000;
+    let decoded_budget = DecodedBudget::new(10_000_000);
 
     let elements = extract_page_elements(
         &document,
@@ -264,15 +262,14 @@ fn form_xobject_recursion_emits_nested_image() {
                 operation_budget: 10_000,
                 max_elements: 10_000,
                 stream_byte_limit: 1_000_000,
-                total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
                 max_content_nesting_depth: 128,
             },
             control: &control,
         },
-        &mut font_registry,
-        &mut remaining_budget,
+        FontRegistryAccess::Mutable(&mut font_registry),
+        &decoded_budget,
     )
     .expect("extract");
 
@@ -342,7 +339,7 @@ fn form_cycle_is_reported_as_structural_error() {
     let scope = page_resource_scope(&document, page_id).expect("scope");
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
-    let mut remaining_budget = 10_000_000;
+    let decoded_budget = DecodedBudget::new(10_000_000);
 
     let error = extract_page_elements(
         &document,
@@ -356,15 +353,14 @@ fn form_cycle_is_reported_as_structural_error() {
                 operation_budget: 10_000,
                 max_elements: 10_000,
                 stream_byte_limit: 1_000_000,
-                total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
                 max_content_nesting_depth: 128,
             },
             control: &control,
         },
-        &mut font_registry,
-        &mut remaining_budget,
+        FontRegistryAccess::Mutable(&mut font_registry),
+        &decoded_budget,
     )
     .expect_err("cycle should fail");
 

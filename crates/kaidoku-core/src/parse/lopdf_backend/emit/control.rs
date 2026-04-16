@@ -1,5 +1,6 @@
 use crate::{CancellationToken, ExtractError, FontDescriptor, FontId, PageNumber};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy)]
@@ -84,9 +85,91 @@ impl FontRegistry {
         Ok(id)
     }
 
+    pub(crate) fn lookup(&self, name: &str) -> Option<FontId> {
+        self.ids_by_name.get(name).copied()
+    }
+
     #[must_use]
     pub(crate) fn into_descriptors(self) -> Vec<FontDescriptor> {
         self.descriptors
+    }
+}
+
+/// Access to the font registry during element emission.
+///
+/// Serial extraction interns font names on demand (`Mutable`). Parallel
+/// extraction runs an explicit pre-pass that populates every font name
+/// upfront, then dispatches lock-free with `ReadOnly` access — lookups only,
+/// no allocation. The invariant that every lookup hits is guaranteed by
+/// `prepopulate_font_registry` walking the same `FontCatalog::iter_display_names`
+/// that emission consults.
+pub(crate) enum FontRegistryAccess<'a> {
+    Mutable(&'a mut FontRegistry),
+    ReadOnly(&'a FontRegistry),
+}
+
+impl FontRegistryAccess<'_> {
+    pub(crate) fn intern_or_lookup(&mut self, name: &str) -> Result<FontId, ExtractError> {
+        match self {
+            Self::Mutable(registry) => registry.intern(name),
+            Self::ReadOnly(registry) => {
+                registry
+                    .lookup(name)
+                    .ok_or_else(|| ExtractError::InvariantViolation {
+                        reason: format!(
+                            "font `{name}` was not present in pre-populated registry during \
+                         parallel extraction"
+                        ),
+                    })
+            }
+        }
+    }
+}
+
+/// Decoded-content-stream budget shared across pages.
+///
+/// Reservation is a single atomic `fetch_update`: the caller subtracts the
+/// number of bytes it is about to emit; on `None` (would underflow) the call
+/// fails immediately with `DecodedStreamBudgetExceeded`. This makes the global
+/// budget correct under both serial and parallel execution — two racing
+/// workers cannot each spend the same stale remainder because the atomic CAS
+/// serializes their reservations.
+#[derive(Debug)]
+pub(crate) struct DecodedBudget {
+    remaining: AtomicUsize,
+    initial_limit: usize,
+}
+
+impl DecodedBudget {
+    #[must_use]
+    pub(crate) const fn new(initial_limit: usize) -> Self {
+        Self {
+            remaining: AtomicUsize::new(initial_limit),
+            initial_limit,
+        }
+    }
+
+    pub(crate) fn try_reserve(
+        &self,
+        requested: usize,
+        page_number: PageNumber,
+    ) -> Result<(), ExtractError> {
+        match self
+            .remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_sub(requested)
+            }) {
+            Ok(_) => Ok(()),
+            Err(remaining_at_fail) => {
+                let consumed_before = self.initial_limit.saturating_sub(remaining_at_fail);
+                let actual_bytes = consumed_before.saturating_add(requested);
+                Err(ExtractError::DecodedStreamBudgetExceeded {
+                    page_number: page_number.get(),
+                    limit_bytes: self.initial_limit,
+                    actual_bytes,
+                })
+            }
+        }
     }
 }
 

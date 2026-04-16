@@ -187,7 +187,7 @@ fn source_refs_are_unique_per_operation() {
         let document = extract_pdf(&bytes, ExtractOptions::default())
             .expect("fixture extraction should succeed");
 
-        for page in document.pages {
+        for page in document.pages() {
             let mut keys = BTreeSet::new();
             for element in page.elements() {
                 let source_ref = element.source_ref();
@@ -214,7 +214,7 @@ fn decoded_text_avoids_control_character_gibberish() {
         let document = extract_pdf(&bytes, ExtractOptions::default())
             .expect("fixture extraction should succeed");
 
-        for page in document.pages {
+        for page in document.pages() {
             for element in page.elements() {
                 let text = if let Some(span) = element.span_payload() {
                     span.text()
@@ -246,7 +246,7 @@ fn span_bboxes_cover_char_bboxes_per_operation() {
         let document = extract_pdf(&bytes, ExtractOptions::default())
             .expect("fixture extraction should succeed");
 
-        for page in document.pages {
+        for page in document.pages() {
             let mut grouped = BTreeMap::new();
             for element in page.elements() {
                 let source_ref = element.source_ref();
@@ -300,7 +300,7 @@ fn bboxes_remain_within_page_bounds_with_tolerance() {
         let document = extract_pdf(&bytes, ExtractOptions::default())
             .expect("fixture extraction should succeed");
 
-        for page in document.pages {
+        for page in document.pages() {
             for element in page.elements() {
                 let bbox = element.bbox();
                 assert!(
@@ -357,7 +357,7 @@ fn explicit_lopdf_backend_selection_is_supported() {
 
     let document =
         extract_pdf(&bytes, options).expect("explicit backend extraction should succeed");
-    assert!(!document.pages.is_empty());
+    assert!(!document.pages().is_empty());
 }
 
 #[test]

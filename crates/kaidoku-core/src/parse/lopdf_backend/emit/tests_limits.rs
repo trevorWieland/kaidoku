@@ -1,6 +1,6 @@
 use super::{
-    ExtractionControl, ExtractionLimits, FontRegistry, PageEmitConfig, content_parser,
-    extract_page_elements,
+    DecodedBudget, ExtractionControl, ExtractionLimits, FontRegistry, FontRegistryAccess,
+    PageEmitConfig, content_parser, extract_page_elements,
 };
 use crate::PageNumber;
 use crate::parse::lopdf_backend::resources::{page_geometry, page_resource_scope};
@@ -51,7 +51,7 @@ fn compressed_stream_limit_is_enforced_during_decode() {
     let scope = page_resource_scope(&document, page_id).expect("scope");
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
-    let mut remaining_budget = 10_000_000;
+    let decoded_budget = DecodedBudget::new(10_000_000);
 
     let error = extract_page_elements(
         &document,
@@ -65,15 +65,14 @@ fn compressed_stream_limit_is_enforced_during_decode() {
                 operation_budget: 10_000,
                 max_elements: 10_000,
                 stream_byte_limit: 1024,
-                total_stream_budget: 10_000_000,
                 max_form_depth: 8,
                 max_form_visits: 128,
                 max_content_nesting_depth: 128,
             },
             control: &control,
         },
-        &mut font_registry,
-        &mut remaining_budget,
+        FontRegistryAccess::Mutable(&mut font_registry),
+        &decoded_budget,
     )
     .expect_err("decoded stream limit should fail");
 
@@ -119,7 +118,7 @@ fn cumulative_decoded_stream_budget_is_enforced() {
     let scope = page_resource_scope(&document, page_id).expect("scope");
     let control = ExtractionControl::new(30_000, None);
     let mut font_registry = FontRegistry::default();
-    let mut remaining_budget = 200;
+    let decoded_budget = DecodedBudget::new(200);
 
     let error = extract_page_elements(
         &document,
@@ -133,15 +132,14 @@ fn cumulative_decoded_stream_budget_is_enforced() {
                 operation_budget: 10_000,
                 max_elements: 10_000,
                 stream_byte_limit: 1_000_000,
-                total_stream_budget: 200,
                 max_form_depth: 8,
                 max_form_visits: 128,
                 max_content_nesting_depth: 128,
             },
             control: &control,
         },
-        &mut font_registry,
-        &mut remaining_budget,
+        FontRegistryAccess::Mutable(&mut font_registry),
+        &decoded_budget,
     )
     .expect_err("cumulative budget should fail");
 

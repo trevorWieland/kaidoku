@@ -1,13 +1,14 @@
 mod document;
+mod extraction;
 mod options;
 mod paging;
 mod primitives;
 mod scalars;
 
 pub use document::{
-    CharPayload, ExtractionDocument, ExtractionPage, ExtractionSource, FontDescriptor,
-    ImagePayload, RawElement, SpanPayload,
+    CharPayload, ExtractionPage, FontDescriptor, ImagePayload, RawElement, SpanPayload,
 };
+pub use extraction::{ExtractionDocument, ExtractionSource};
 pub use options::{
     CancellationToken, ExtractOptions, ExtractOptionsError, default_max_content_nesting_depth,
     default_max_content_stream_bytes, default_max_elements_per_page,

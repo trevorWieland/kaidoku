@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 mod environment;
 mod regression;
+mod stats;
 use environment::benchmark_environment;
+use stats::{bytes_to_mib, mad, median, round_metric};
 
 const BENCH_SCHEMA_VERSION: &str = "kaidoku.phase1.bench.v4";
 const THROUGHPUT_MAX_REGRESSION_RATIO: f64 = 0.15;
@@ -28,6 +30,22 @@ const REQUIRED_PHASE1_FIXTURES: [&str; 6] = [
     "pdfjs_copy_paste_ligatures.pdf",
     "pdfjs_arabic_cid_true_type.pdf",
     "pdfjs_identity_to_unicode_map_char_code_of.pdf",
+];
+
+/// Runner classes that MUST have a baseline entry in
+/// `tests/golden/phase1/benchmarks.baseline.json` at all times.
+///
+/// If any class is missing the bench gate fails fast with a precise error
+/// instead of the CI job quietly succeeding on only some runners. Seeding new
+/// entries is a deliberate operator action via `just phase1-bench-refresh` on
+/// the corresponding runner.
+pub(super) const REQUIRED_BASELINE_RUNNER_CLASSES: &[&str] = &[
+    // Local dev machine (M1 Pro / M3 Pro tier with rustc 1.94).
+    "macos-aarch64-release-core-large-rustc1.94",
+    // GitHub Actions macOS runner (aarch64, small core tier, pinned rustc 1.85).
+    "macos-aarch64-release-core-small-rustc1.85",
+    // GitHub Actions Ubuntu runner (x86_64, small core tier, pinned rustc 1.85).
+    "linux-x86_64-release-core-small-rustc1.85",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,7 +430,7 @@ fn load_bench_baseline_store(path: &Path) -> Result<BenchBaselineStore> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("failed reading baseline benchmark {}", path.display()))?;
 
-    if let Ok(store) = serde_json::from_str::<BenchBaselineStore>(&content) {
+    let store = if let Ok(store) = serde_json::from_str::<BenchBaselineStore>(&content) {
         if store.schema_version != BENCH_SCHEMA_VERSION {
             bail!(
                 "unexpected benchmark schema {} in {}",
@@ -420,81 +438,52 @@ fn load_bench_baseline_store(path: &Path) -> Result<BenchBaselineStore> {
                 path.display(),
             );
         }
-        return Ok(store);
-    }
+        store
+    } else {
+        let report: BenchReport = serde_json::from_str(&content)
+            .with_context(|| format!("failed parsing baseline benchmark {}", path.display()))?;
+        if report.schema_version != BENCH_SCHEMA_VERSION {
+            bail!(
+                "unexpected benchmark schema {} in {}",
+                report.schema_version,
+                path.display(),
+            );
+        }
+        BenchBaselineStore {
+            schema_version: BENCH_SCHEMA_VERSION.to_string(),
+            reports: vec![report],
+        }
+    };
 
-    let report: BenchReport = serde_json::from_str(&content)
-        .with_context(|| format!("failed parsing baseline benchmark {}", path.display()))?;
-    if report.schema_version != BENCH_SCHEMA_VERSION {
-        bail!(
-            "unexpected benchmark schema {} in {}",
-            report.schema_version,
-            path.display(),
-        );
-    }
+    validate_required_runner_classes(&store, path)?;
+    Ok(store)
+}
 
-    Ok(BenchBaselineStore {
-        schema_version: BENCH_SCHEMA_VERSION.to_string(),
-        reports: vec![report],
-    })
+fn validate_required_runner_classes(store: &BenchBaselineStore, path: &Path) -> Result<()> {
+    let present = store
+        .reports
+        .iter()
+        .map(|report| report.environment.runner_class.as_str())
+        .collect::<BTreeSet<_>>();
+    let missing = REQUIRED_BASELINE_RUNNER_CLASSES
+        .iter()
+        .copied()
+        .filter(|class| !present.contains(class))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "benchmark baseline {} is missing required runner class(es): [{}]. Seed them with \
+         `just phase1-bench-refresh` on the corresponding runner.",
+        path.display(),
+        missing.join(", ")
+    );
 }
 
 fn is_baseline_path(path: &Path) -> bool {
     path.file_name() == Some(OsStr::new("benchmarks.baseline.json"))
 }
 
-fn median(values: &mut [f64]) -> f64 {
-    values.sort_by(f64::total_cmp);
-    let midpoint = values.len() / 2;
-    if values.len() % 2 == 0 {
-        f64::midpoint(values[midpoint - 1], values[midpoint])
-    } else {
-        values[midpoint]
-    }
-}
-
-fn mad(values: &[f64], median_value: f64) -> f64 {
-    if values.is_empty() {
-        return 0.0;
-    }
-
-    let mut deviations = values
-        .iter()
-        .map(|value| (value - median_value).abs())
-        .collect::<Vec<f64>>();
-    median(&mut deviations)
-}
-
-fn round_metric(value: f64) -> f64 {
-    (value * 1000.0).round() / 1000.0
-}
-
-fn bytes_to_mib(bytes: u64) -> f64 {
-    let high = u32::try_from(bytes >> 32).expect("high u64 half fits u32");
-    let low = u32::try_from(bytes & u64::from(u32::MAX)).expect("low u64 half fits u32");
-    let bytes_f64 = f64::from(high) * 4_294_967_296.0 + f64::from(low);
-    bytes_f64 / BYTES_PER_MIB
-}
-
 #[cfg(test)]
-mod tests {
-    use super::bytes_to_mib;
-    use crate::bench_cmd::environment::{cpu_core_tier, runner_class};
-
-    #[test]
-    fn bytes_to_mib_handles_values_larger_than_4gib() {
-        let five_gib = 5_u64 * 1024 * 1024 * 1024;
-        let mib = bytes_to_mib(five_gib);
-        assert!(mib > 5_000.0);
-        assert!(mib < 5_200.0);
-    }
-
-    #[test]
-    fn runner_class_is_stable_and_runner_aware() {
-        let class = runner_class("linux", "x86_64", "release", 12, "rustc 1.94.1 (abc)");
-        assert!(class.contains("linux-x86_64-release"));
-        assert!(class.contains("core-large"));
-        assert!(class.contains("rustc1.94"));
-        assert_eq!(cpu_core_tier(2), "core-small");
-    }
-}
+mod tests;

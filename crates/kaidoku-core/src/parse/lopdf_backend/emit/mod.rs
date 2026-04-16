@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "fuzzing")]
 pub(crate) use content_parser::parse_content_operations_bounded as content_parser_bounded_for_fuzz;
-pub(super) use control::FontRegistry;
-pub(crate) use control::{ExtractionControl, ExtractionStage};
+pub(crate) use control::{DecodedBudget, ExtractionControl, ExtractionStage};
+pub(super) use control::{FontRegistry, FontRegistryAccess};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct OperationCursor {
@@ -49,7 +49,7 @@ pub(super) struct EmitContext<'a> {
     coordinate_precision: u8,
     page_geometry: PageGeometry,
     font_catalog: &'a FontCatalog<'a>,
-    font_registry: &'a mut FontRegistry,
+    font_registry: FontRegistryAccess<'a>,
     max_elements_per_page: u32,
     out: &'a mut Vec<RawElement>,
 }
@@ -59,7 +59,6 @@ pub(super) struct ExtractionLimits {
     pub(super) operation_budget: u32,
     pub(super) max_elements: u32,
     pub(super) stream_byte_limit: usize,
-    pub(super) total_stream_budget: usize,
     pub(super) max_form_depth: usize,
     pub(super) max_form_visits: usize,
     pub(super) max_content_nesting_depth: usize,
@@ -89,7 +88,7 @@ struct ProcessRuntime<'a> {
     total_operations: &'a mut u32,
     next_stream_index: &'a mut u32,
     traversal: &'a mut FormTraversal,
-    remaining_decoded_budget: &'a mut usize,
+    decoded_budget: &'a DecodedBudget,
     control: &'a ExtractionControl,
     form_scope_cache: &'a mut HashMap<ObjectId, Arc<HashMap<Vec<u8>, ObjectId>>>,
 }
@@ -152,7 +151,7 @@ impl EmitContext<'_> {
         let Some(font_name) = self.font_catalog.display_name(font_key) else {
             return Ok(None);
         };
-        Ok(Some(self.font_registry.intern(font_name)?))
+        Ok(Some(self.font_registry.intern_or_lookup(font_name)?))
     }
 
     fn source_ref(
@@ -258,8 +257,8 @@ pub(super) fn extract_page_elements(
     page_number: PageNumber,
     page_id: ObjectId,
     config: PageEmitConfig<'_>,
-    font_registry: &mut FontRegistry,
-    remaining_decoded_budget: &mut usize,
+    font_registry: FontRegistryAccess<'_>,
+    decoded_budget: &DecodedBudget,
 ) -> Result<Vec<RawElement>, ExtractError> {
     config
         .control
@@ -299,7 +298,7 @@ pub(super) fn extract_page_elements(
         total_operations: &mut total_operations,
         next_stream_index: &mut next_stream_index,
         traversal: &mut traversal,
-        remaining_decoded_budget,
+        decoded_budget,
         control: config.control,
         form_scope_cache: &mut form_scope_cache,
     };
@@ -355,22 +354,13 @@ fn process_stream(
         runtime.control,
     )?;
 
-    if content_bytes.len() > *runtime.remaining_decoded_budget {
-        let consumed_before = runtime
-            .limits
-            .total_stream_budget
-            .saturating_sub(*runtime.remaining_decoded_budget);
-        let actual_bytes = consumed_before.saturating_add(content_bytes.len());
+    if let Err(error) = runtime
+        .decoded_budget
+        .try_reserve(content_bytes.len(), emit.page_number)
+    {
         emit.stream_index = previous_stream_index;
-        return Err(ExtractError::DecodedStreamBudgetExceeded {
-            page_number: emit.page_number.get(),
-            limit_bytes: runtime.limits.total_stream_budget,
-            actual_bytes,
-        });
+        return Err(error);
     }
-    *runtime.remaining_decoded_budget = runtime
-        .remaining_decoded_budget
-        .saturating_sub(content_bytes.len());
 
     runtime.control.checkpoint(
         ExtractionStage::ProcessStreamParseOperation,

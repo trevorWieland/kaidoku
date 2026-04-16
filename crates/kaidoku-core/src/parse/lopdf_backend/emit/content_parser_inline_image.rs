@@ -1,28 +1,40 @@
 //! Spec-hardened inline image (BI/ID/EI) parsing (ISO 32000-1 §8.9.7).
 //!
-//! Two code paths are supported:
+//! Three code paths are supported in order of preference:
 //!
 //! 1. **Length-first**: when the inline image dictionary declares `/L` or
 //!    `/Length`, the parser consumes exactly that many bytes of payload and
 //!    verifies that the next tokens are `EI` followed by whitespace or a
 //!    delimiter. This is unambiguous even when the encoded payload contains
 //!    byte sequences that visually resemble `EI`.
-//! 2. **EOL-guarded scan**: when no length is declared AND no filter is
-//!    applied, we scan forward for the canonical terminator
-//!    `EOL EI (whitespace | delimiter | EOF)`. The leading EOL anchor plus
-//!    the requirement that the byte following `EI` not be alphanumeric
-//!    rejects false matches like `... EID ...` or `... EIR ...` buried in
-//!    raw image bytes.
-//!
-//! When a filter (`/F` or `/Filter`) is declared but no length, we refuse to
-//! guess and return a precise `ContentDecode` error naming the filter. This
-//! fails fast rather than risking a silently misinterpreted operation stream.
+//! 2. **Whitespace-anchored scan (unfiltered)**: when no length is declared
+//!    AND no filter is applied, scan forward for the canonical terminator
+//!    `WS EI (whitespace | delimiter | EOF)`. Any whitespace byte (space,
+//!    tab, LF, CR) is a valid anchor, because unfiltered inline image data
+//!    is ASCII-range and well-formed producers always surround `EI` with
+//!    whitespace.
+//! 3. **Bounded filtered fallback**: when a filter (`/F` or `/Filter`) is
+//!    declared but no length, scan for the same `WS EI` pattern but within a
+//!    strict byte cap and with a strict lookahead requiring the bytes after
+//!    `EI` to begin a plausible PDF content operation (whitespace, EOF, or a
+//!    content-operator-start byte). If no candidate matches within the cap,
+//!    fall through to a precise `ContentDecode` error rather than guessing.
 
 use super::{
     ContentParser, TOKEN_CHECKPOINT_INTERVAL, is_content_space, is_delimiter, is_eol, is_whitespace,
 };
 use crate::ExtractError;
 use lopdf::{Dictionary, Object, Stream, content::Operation};
+
+/// Maximum bytes the filtered-fallback scan will examine before giving up.
+/// Filtered inline images are extremely rare in the wild and typically small;
+/// anything beyond `4 MiB` is almost certainly a malformed stream.
+const INLINE_IMAGE_FILTER_FALLBACK_CAP: usize = 4 * 1024 * 1024;
+
+/// Maximum number of candidate `EI` positions to trial-validate in the
+/// filtered fallback. Bounds work even when many false-positive `WS EI` byte
+/// sequences appear in compressed payloads.
+const INLINE_IMAGE_FALLBACK_MAX_TRIALS: usize = 8;
 
 impl ContentParser<'_> {
     pub(super) fn parse_inline_image(&mut self) -> Result<Operation, ExtractError> {
@@ -66,16 +78,10 @@ impl ContentParser<'_> {
         }
 
         if has_declared_filter(&dict) {
-            let filter_name = filter_display_name(&dict).unwrap_or_else(|| "<unknown>".to_string());
-            return Err(ExtractError::ContentDecode {
-                reason: format!(
-                    "inline image declares filter `{filter_name}` without `/Length` or `/L`; \
-                     unable to determine payload boundary safely"
-                ),
-            });
+            return self.consume_inline_image_filtered_fallback(dict);
         }
 
-        self.consume_inline_image_with_eol_scan(dict)
+        self.consume_inline_image_with_ws_scan(dict)
     }
 
     fn expect_inline_image_start(&mut self) -> Result<(), ExtractError> {
@@ -128,7 +134,7 @@ impl ContentParser<'_> {
         })
     }
 
-    fn consume_inline_image_with_eol_scan(
+    fn consume_inline_image_with_ws_scan(
         &mut self,
         dict: Dictionary,
     ) -> Result<Operation, ExtractError> {
@@ -136,15 +142,13 @@ impl ContentParser<'_> {
         let mut index = data_start;
 
         while index < self.bytes.len() {
-            self.parse_steps = self.parse_steps.saturating_add(1);
-            if self.parse_steps % TOKEN_CHECKPOINT_INTERVAL == 0 {
-                self.control.checkpoint(
-                    super::ExtractionStage::ContentParseToken,
-                    Some(self.page_number),
-                )?;
-            }
+            self.bump_parse_steps_checkpoint()?;
 
-            if is_eol(self.bytes[index])
+            // Whitespace-anchored scan. A real EOL+EI is always accepted;
+            // additionally accept space/tab-anchored positions because many
+            // well-formed producers write `... EI ` without the leading EOL
+            // required by the strictest reading of the spec.
+            if is_content_space(self.bytes[index])
                 && let Some(payload_end) = self.match_ei_terminator(index)
             {
                 let content = self.bytes[data_start..index].to_vec();
@@ -161,11 +165,79 @@ impl ContentParser<'_> {
         self.content_error("inline image data is missing EI terminator")
     }
 
-    /// After the EOL at `eol_index`, is the sequence `(space?)EI(space|delim|EOF)`?
+    fn consume_inline_image_filtered_fallback(
+        &mut self,
+        dict: Dictionary,
+    ) -> Result<Operation, ExtractError> {
+        let data_start = self.cursor;
+        let scan_ceiling = data_start
+            .saturating_add(INLINE_IMAGE_FILTER_FALLBACK_CAP)
+            .min(self.bytes.len());
+        let mut index = data_start;
+        let mut trials_used: usize = 0;
+
+        while index < scan_ceiling {
+            self.bump_parse_steps_checkpoint()?;
+
+            if !is_content_space(self.bytes[index]) {
+                index = index.saturating_add(1);
+                continue;
+            }
+
+            let Some(payload_end) = self.match_ei_terminator(index) else {
+                index = index.saturating_add(1);
+                continue;
+            };
+
+            trials_used = trials_used.saturating_add(1);
+
+            if payload_end < self.bytes.len()
+                && !is_plausible_content_op_start(self.bytes[payload_end])
+            {
+                if trials_used >= INLINE_IMAGE_FALLBACK_MAX_TRIALS {
+                    break;
+                }
+                index = index.saturating_add(1);
+                continue;
+            }
+
+            let content = self.bytes[data_start..index].to_vec();
+            self.cursor = payload_end;
+            self.skip_content_space()?;
+            return Ok(Operation {
+                operator: "BI".to_string(),
+                operands: vec![Object::Stream(Stream::new(dict, content))],
+            });
+        }
+
+        let filter_name = filter_display_name(&dict).unwrap_or_else(|| "<unknown>".to_string());
+        let cap = INLINE_IMAGE_FILTER_FALLBACK_CAP;
+        Err(ExtractError::ContentDecode {
+            reason: format!(
+                "inline image declares filter `{filter_name}` without `/Length` or `/L` and \
+                 no whitespace-delimited `EI` terminator was found within {cap} bytes \
+                 (after {trials_used} candidate trials)"
+            ),
+        })
+    }
+
+    fn bump_parse_steps_checkpoint(&mut self) -> Result<(), ExtractError> {
+        self.parse_steps = self.parse_steps.saturating_add(1);
+        if self.parse_steps % TOKEN_CHECKPOINT_INTERVAL == 0 {
+            self.control.checkpoint(
+                super::ExtractionStage::ContentParseToken,
+                Some(self.page_number),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// After the whitespace anchor at `ws_index`, is the sequence
+    /// `(space?)EI(space|delim|EOF)`?
     /// Returns the byte offset immediately after the `EI` token on success.
-    fn match_ei_terminator(&self, eol_index: usize) -> Option<usize> {
-        let mut cursor = eol_index.checked_add(1)?;
-        // Allow one or more whitespace bytes between the EOL anchor and EI.
+    fn match_ei_terminator(&self, ws_index: usize) -> Option<usize> {
+        let mut cursor = ws_index.checked_add(1)?;
+        // Allow one or more whitespace bytes between the anchor and EI.
         while cursor < self.bytes.len() && is_content_space(self.bytes[cursor]) {
             cursor = cursor.checked_add(1)?;
         }
@@ -216,4 +288,16 @@ fn filter_display_name(dict: &Dictionary) -> Option<String> {
             .map(|name| String::from_utf8_lossy(name).to_string()),
         _ => None,
     }
+}
+
+/// Bytes that can legitimately begin a PDF content-stream token after an
+/// inline image terminator: whitespace (already excluded by caller), EOL,
+/// operator letters, number literals, or the opening delimiters of an
+/// operand. This narrows false-positive matches inside filtered payloads.
+fn is_plausible_content_op_start(byte: u8) -> bool {
+    is_whitespace(byte)
+        || is_eol(byte)
+        || matches!(byte, b'(' | b'<' | b'[' | b'/' | b'%' | b'+' | b'-' | b'.')
+        || byte.is_ascii_digit()
+        || byte.is_ascii_alphabetic()
 }

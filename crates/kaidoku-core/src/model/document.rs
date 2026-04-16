@@ -1,7 +1,4 @@
-use super::primitives::{
-    BBox, BackendIdentifier, FontId, PageNumber, SchemaIdentifier, Sha256Digest, SourceRef,
-    ValidationError,
-};
+use super::primitives::{BBox, FontId, PageNumber, SourceRef, ValidationError};
 use super::scalars::{NonNegativeFinite, PositiveFinite};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -332,19 +329,4 @@ impl<'de> Deserialize<'de> for ExtractionPage {
         Self::new(raw.page_number, raw.width, raw.height, raw.elements)
             .map_err(serde::de::Error::custom)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ExtractionSource {
-    pub backend: BackendIdentifier,
-    pub input_sha256: Sha256Digest,
-    pub input_bytes: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExtractionDocument {
-    pub schema_version: SchemaIdentifier,
-    pub source: ExtractionSource,
-    pub fonts: Vec<FontDescriptor>,
-    pub pages: Vec<ExtractionPage>,
 }

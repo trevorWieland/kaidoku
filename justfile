@@ -145,20 +145,25 @@ phase1-gate:
 phase1-demo:
     @{{ cargo }} run -p kaidoku-cli -- extract --input tests/corpus/phase1/doclaynet_simple_text.pdf --input tests/corpus/phase1/doclaynet_multi_column.pdf --input tests/corpus/phase1/doclaynet_mixed_content.pdf --input tests/corpus/phase1/pdfjs_copy_paste_ligatures.pdf --input tests/corpus/phase1/pdfjs_arabic_cid_true_type.pdf --input tests/corpus/phase1/pdfjs_identity_to_unicode_map_char_code_of.pdf --output target/phase1/demo
 
+# Fixed LibFuzzer seeds (-seed=0xN) make transcripts reproducible: the
+# generated corpus mutations are deterministic for the same seed + time
+# budget, so a regression that showed up in CI can be replayed verbatim
+# locally with `just phase1-fuzz-smoke`.
 phase1-fuzz-smoke:
-    @cd fuzz && cargo +nightly fuzz run decode_filters -- -max_total_time=20
-    @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=20
-    @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=20
-    @cd fuzz && cargo +nightly fuzz run content_parser -- -max_total_time=20
+    @cd fuzz && cargo +nightly fuzz run decode_filters -- -max_total_time=20 -seed=1
+    @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=20 -seed=2
+    @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=20 -seed=3
+    @cd fuzz && cargo +nightly fuzz run content_parser -- -max_total_time=20 -seed=4
 
 # PR-blocking fuzz-smoke invoked from .github/workflows/ci.yml — a slightly
 # longer run than the local 20 s smoke so transient regressions surface before
 # merge. Still capped short enough (~2 min total) not to dominate CI time.
+# Seeds match phase1-fuzz-smoke so CI and local runs explore the same paths.
 phase1-fuzz-smoke-ci:
-    @cd fuzz && cargo +nightly fuzz run decode_filters -- -max_total_time=30
-    @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=30
-    @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=30
-    @cd fuzz && cargo +nightly fuzz run content_parser -- -max_total_time=30
+    @cd fuzz && cargo +nightly fuzz run decode_filters -- -max_total_time=30 -seed=1
+    @cd fuzz && cargo +nightly fuzz run content_ops -- -max_total_time=30 -seed=2
+    @cd fuzz && cargo +nightly fuzz run geometry_normalization -- -max_total_time=30 -seed=3
+    @cd fuzz && cargo +nightly fuzz run content_parser -- -max_total_time=30 -seed=4
 
 # Single orchestrated Phase-1 demo: produces artifacts, verifies goldens,
 # checks benchmarks against baseline, runs a short fuzz smoke, and writes a

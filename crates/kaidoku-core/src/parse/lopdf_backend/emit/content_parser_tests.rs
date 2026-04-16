@@ -130,9 +130,35 @@ fn parses_inline_image_with_eol_guarded_scan_rejects_embedded_ei_without_eol() {
 }
 
 #[test]
-fn inline_image_without_length_but_with_filter_errors_out_explicitly() {
+fn filtered_inline_image_without_length_falls_back_with_ws_anchor() {
+    // Real-world PDF producers sometimes emit filtered inline images without
+    // an explicit `/Length`. The bounded filtered-fallback scan terminates on
+    // the canonical `WS EI WS` sequence.
     let body = b"BI /Filter /FlateDecode /W 1 /H 1 ID \x78\x9c\x00\nEI Q";
-    let err = parse(body).expect_err("must refuse to guess with filter but no length");
+    let operations = parse(body).expect("filtered inline image should fall back");
+    assert_eq!(operations.len(), 2);
+    assert_eq!(operations[0].operator, "BI");
+    assert_eq!(operations[1].operator, "Q");
+    assert!(
+        matches!(operations[0].operands.as_slice(), [Object::Stream(_)]),
+        "expected single stream operand, got {:?}",
+        operations[0].operands
+    );
+    let [Object::Stream(stream)] = operations[0].operands.as_slice() else {
+        return;
+    };
+    assert_eq!(stream.content, b"\x78\x9c\x00");
+}
+
+#[test]
+fn filtered_inline_image_fallback_errors_when_no_terminator_within_cap() {
+    // A filtered payload where no `WS EI (ws|delim|EOF)` sequence ever appears
+    // must still error — we do not silently consume the rest of the stream.
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(b"BI /Filter /FlateDecode /W 1 /H 1 ID ");
+    body.extend(std::iter::repeat_n(b'X', 512));
+
+    let err = parse(&body).expect_err("must refuse to guess when no WS EI pattern exists");
     assert!(
         matches!(err, ExtractError::ContentDecode { .. }),
         "expected ContentDecode, got {err:?}"
@@ -141,7 +167,28 @@ fn inline_image_without_length_but_with_filter_errors_out_explicitly() {
         return;
     };
     assert!(reason.contains("FlateDecode"), "reason: {reason}");
-    assert!(reason.contains("Length"), "reason: {reason}");
+    assert!(
+        reason.contains("no whitespace-delimited"),
+        "reason: {reason}"
+    );
+}
+
+#[test]
+fn ws_anchored_scan_accepts_space_preceded_ei_without_eol() {
+    // Unfiltered inline image whose payload ends with ` EI ` (space anchor,
+    // not EOL). A strict EOL-only scan would reject this; the relaxed WS
+    // anchor accepts it, matching real producer output.
+    let body = b"BI /W 1 /H 1 ID ABC EI Q";
+    let operations = parse(body).expect("ws-anchored terminator should succeed");
+    assert_eq!(operations.len(), 2);
+    assert!(
+        matches!(operations[0].operands.as_slice(), [Object::Stream(_)]),
+        "expected single stream operand"
+    );
+    let [Object::Stream(stream)] = operations[0].operands.as_slice() else {
+        return;
+    };
+    assert_eq!(stream.content, b"ABC");
 }
 
 #[test]

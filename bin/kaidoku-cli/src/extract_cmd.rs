@@ -1,11 +1,15 @@
 use crate::ExtractCommand;
 use anyhow::{Context, Result, anyhow, bail};
-use kaidoku_core::{ExtractOptions, PageRange, PageSelection, extract_pdf, to_canonical_json};
+use kaidoku_core::{
+    ExtractOptions, PageRange, PageSelection, default_max_input_bytes, extract_pdf,
+    to_canonical_json,
+};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub(super) fn run_extract(command: ExtractCommand) -> Result<()> {
@@ -50,8 +54,7 @@ fn extract_one(
     page_selection: PageSelection,
     max_wall_time_ms: u64,
 ) -> Result<()> {
-    let bytes = fs::read(input_path)
-        .with_context(|| format!("failed reading input file {}", input_path.display()))?;
+    let bytes = read_input_with_limit(input_path, default_max_input_bytes())?;
 
     let options = ExtractOptions::builder()
         .page_selection(page_selection)
@@ -67,6 +70,52 @@ fn extract_one(
         .with_context(|| format!("failed writing output {}", output_path.display()))?;
 
     Ok(())
+}
+
+/// Read `path` fully into memory, but never buffer more than `limit` bytes.
+///
+/// The check is enforced twice: first via `fs::metadata` so oversized files
+/// are rejected before any allocation, and second via a bounded
+/// `Read::take(limit + 1)` so a TOCTOU grow between `metadata()` and `open()`
+/// still fails loudly instead of allocating an unbounded buffer.
+fn read_input_with_limit(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed stat-ing input file {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("input path {} is not a regular file", path.display());
+    }
+
+    let declared_size = usize::try_from(metadata.len())
+        .with_context(|| format!("file size does not fit into usize for {}", path.display()))?;
+    if declared_size > limit {
+        bail!(
+            "input file {} is {} bytes, which exceeds the configured size limit of {} bytes",
+            path.display(),
+            declared_size,
+            limit,
+        );
+    }
+
+    let file = fs::File::open(path)
+        .with_context(|| format!("failed reading input file {}", path.display()))?;
+    let take_limit = u64::try_from(limit)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .context("size limit overflows u64")?;
+    let mut buffer = Vec::with_capacity(declared_size);
+    file.take(take_limit)
+        .read_to_end(&mut buffer)
+        .with_context(|| format!("failed reading input file {}", path.display()))?;
+
+    if buffer.len() > limit {
+        bail!(
+            "input file {} grew past the {}-byte limit while being read",
+            path.display(),
+            limit,
+        );
+    }
+
+    Ok(buffer)
 }
 
 fn plan_output_paths(inputs: &[PathBuf], output_dir: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
@@ -199,7 +248,11 @@ fn parse_pages_spec(spec: Option<&str>) -> Result<PageSelection> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PageSelection, extraction_output_stem, parse_pages_spec, plan_output_paths};
+    use super::{
+        PageSelection, extraction_output_stem, parse_pages_spec, plan_output_paths,
+        read_input_with_limit,
+    };
+    use std::io::Write;
     use std::path::Path;
 
     #[test]
@@ -240,6 +293,35 @@ mod tests {
             return;
         };
         assert_eq!(output_a, output_b);
+    }
+
+    #[test]
+    fn read_input_with_limit_rejects_oversize_via_metadata() {
+        let tmp = std::env::temp_dir().join("kaidoku_extract_cmd_oversize.bin");
+        {
+            let mut file = std::fs::File::create(&tmp).expect("create tmp file");
+            file.write_all(&[0_u8; 128]).expect("write tmp file");
+        }
+        let result = read_input_with_limit(&tmp, 16);
+        let _ = std::fs::remove_file(&tmp);
+        let err = result.expect_err("metadata preflight should reject oversize file");
+        assert!(
+            err.to_string()
+                .contains("exceeds the configured size limit")
+        );
+    }
+
+    #[test]
+    fn read_input_with_limit_accepts_small_file() {
+        let tmp = std::env::temp_dir().join("kaidoku_extract_cmd_small.bin");
+        {
+            let mut file = std::fs::File::create(&tmp).expect("create tmp file");
+            file.write_all(b"0123456789").expect("write tmp file");
+        }
+        let result = read_input_with_limit(&tmp, 1024);
+        let _ = std::fs::remove_file(&tmp);
+        let bytes = result.expect("small file should read within limit");
+        assert_eq!(bytes, b"0123456789");
     }
 
     #[test]

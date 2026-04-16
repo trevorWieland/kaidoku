@@ -20,6 +20,18 @@ pub enum ValidationError {
     InvalidBackendIdentifier,
     #[error("sha256 digest must be lowercase hex with exactly 64 characters")]
     InvalidSha256Digest,
+    #[error("extraction document must contain at least one page")]
+    EmptyPages,
+    #[error(
+        "extraction pages must be sorted by ascending page_number with no duplicates; offending page {page_number}"
+    )]
+    UnsortedOrDuplicatePage { page_number: u32 },
+    #[error("extraction document fonts must have unique ids; duplicate font id {font_id}")]
+    DuplicateFontId { font_id: u32 },
+    #[error(
+        "extraction document references font id {font_id} on page {page_number} but the font is not registered"
+    )]
+    UnknownFontReference { font_id: u32, page_number: u32 },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

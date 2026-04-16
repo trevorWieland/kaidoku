@@ -18,7 +18,7 @@ fn first_page_fast_path_matches_slow_path_for_every_fixture() {
 
         let fast_doc =
             extract_pdf_first_page(&bytes, ExtractOptions::default()).expect("fast path");
-        assert_eq!(fast_doc.pages.len(), 1);
+        assert_eq!(fast_doc.pages().len(), 1);
 
         let slow_options = ExtractOptions::builder()
             .page_selection(PageSelection::Range(
@@ -27,7 +27,7 @@ fn first_page_fast_path_matches_slow_path_for_every_fixture() {
             .build()
             .expect("options");
         let slow_doc = extract_pdf(&bytes, slow_options).expect("slow path");
-        assert_eq!(slow_doc.pages.len(), 1);
+        assert_eq!(slow_doc.pages().len(), 1);
 
         // The fast and slow paths must produce byte-identical canonical JSON
         // for the first page. Any divergence indicates the fast path is
@@ -63,13 +63,15 @@ fn parallel_extraction_yields_same_page_set_and_element_counts_as_serial() {
         let parallel_doc = extract_pdf(&bytes, parallel_options).expect("parallel");
 
         assert_eq!(
-            serial_doc.pages.len(),
-            parallel_doc.pages.len(),
+            serial_doc.pages().len(),
+            parallel_doc.pages().len(),
             "page count mismatch on fixture {}",
             fixture_path.display()
         );
 
-        for (serial_page, parallel_page) in serial_doc.pages.iter().zip(parallel_doc.pages.iter()) {
+        for (serial_page, parallel_page) in
+            serial_doc.pages().iter().zip(parallel_doc.pages().iter())
+        {
             assert_eq!(
                 serial_page.page_number(),
                 parallel_page.page_number(),

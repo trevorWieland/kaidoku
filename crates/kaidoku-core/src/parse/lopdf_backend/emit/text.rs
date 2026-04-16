@@ -38,6 +38,11 @@ pub(super) fn emit_text_array(
     Ok(())
 }
 
+struct PlacedGlyph {
+    character: char,
+    bbox: BBox,
+}
+
 pub(super) fn emit_text_elements(
     text_object: &Object,
     text_state: &mut TextState,
@@ -74,20 +79,22 @@ pub(super) fn emit_text_elements(
 
     let font_id = context.intern_font_id(text_state.font_key())?;
 
-    let mut probe_state = text_state.clone();
+    // Single pass over glyph runs: compute each glyph's bbox once, union it
+    // into the span's bbox, and retain the per-glyph result so the char
+    // emission loop below can reuse it without recomputing advances or
+    // transforms. This collapses the previous probe/emit dual pass.
+    let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(char_count);
     let mut span_bbox: Option<BBox> = None;
     for run in &glyph_runs {
-        let advances =
-            glyph_char_advances(&probe_state, run.text.as_str(), run.width_units.max(0.0));
+        let advances = glyph_char_advances(text_state, run.text.as_str(), run.width_units.max(0.0));
         for (character, glyph_advance, total_advance) in advances {
-            let char_bbox = char_bbox_for_state(&probe_state, graphics_state, glyph_advance)?;
+            let bbox = char_bbox_for_state(text_state, graphics_state, glyph_advance)?;
             span_bbox = Some(match span_bbox {
-                None => char_bbox,
-                Some(previous) => merge_bbox(previous, char_bbox)?,
+                None => bbox,
+                Some(previous) => merge_bbox(previous, bbox)?,
             });
-
-            let _ = character;
-            probe_state.advance_text(total_advance);
+            placed.push(PlacedGlyph { character, bbox });
+            text_state.advance_text(total_advance);
         }
     }
 
@@ -108,36 +115,26 @@ pub(super) fn emit_text_elements(
         operation_index,
         span_element_index,
         span_bbox,
-        SpanPayload::new(decoded_text.clone(), font_id, text_state.font_size())?,
+        SpanPayload::new(decoded_text, font_id, text_state.font_size())?,
     )?;
 
-    let mut char_index: u32 = 0;
-    for run in glyph_runs {
-        for (character, glyph_advance, total_advance) in
-            glyph_char_advances(text_state, run.text.as_str(), run.width_units.max(0.0))
-        {
-            let char_bbox = char_bbox_for_state(text_state, graphics_state, glyph_advance)?;
-
-            let char_element_index = cursor.next_element_index()?;
-            context.push_char(
-                operation_index,
-                char_element_index,
-                char_bbox,
-                CharPayload::new(
-                    character.to_string(),
-                    font_id,
-                    text_state.font_size(),
-                    char_index,
-                )?,
-            )?;
-
-            char_index = char_index
-                .checked_add(1)
-                .ok_or(ExtractError::InvariantViolation {
-                    reason: "character index overflow".to_string(),
-                })?;
-            text_state.advance_text(total_advance);
-        }
+    for (char_index_usize, glyph) in placed.into_iter().enumerate() {
+        let char_index =
+            u32::try_from(char_index_usize).map_err(|_| ExtractError::InvariantViolation {
+                reason: "character index overflow".to_string(),
+            })?;
+        let char_element_index = cursor.next_element_index()?;
+        context.push_char(
+            operation_index,
+            char_element_index,
+            glyph.bbox,
+            CharPayload::new(
+                glyph.character.to_string(),
+                font_id,
+                text_state.font_size(),
+                char_index,
+            )?,
+        )?;
     }
 
     Ok(())

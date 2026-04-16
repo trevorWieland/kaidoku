@@ -1,12 +1,18 @@
 pub(crate) mod emit;
 pub(crate) mod resources;
 
+#[cfg(test)]
+mod parallel_extraction_tests;
+
 use super::ParserBackend;
 use crate::{
     BACKEND_ID, ExtractError, ExtractOptions, ExtractionDocument, ExtractionPage, ExtractionSource,
     PageNumber, SCHEMA_VERSION, Sha256Digest,
 };
-use emit::{ExtractionControl, ExtractionLimits, ExtractionStage, FontRegistry, PageEmitConfig};
+use emit::{
+    DecodedBudget, ExtractionControl, ExtractionLimits, ExtractionStage, FontRegistry,
+    FontRegistryAccess, PageEmitConfig,
+};
 use lopdf::{Document, Object, ObjectId};
 use sha2::{Digest, Sha256};
 
@@ -58,18 +64,15 @@ impl ParserBackend for LopdfBackend {
             return Err(ExtractError::EmptySelection);
         }
 
-        let source = ExtractionSource {
-            backend: BACKEND_ID,
-            input_sha256: sha256_digest(input_bytes),
-            input_bytes: input_bytes.len(),
-        };
+        let source =
+            ExtractionSource::new(BACKEND_ID, sha256_digest(input_bytes), input_bytes.len());
 
-        Ok(ExtractionDocument {
-            schema_version: SCHEMA_VERSION,
+        Ok(ExtractionDocument::new(
+            SCHEMA_VERSION,
             source,
-            fonts: font_registry.into_descriptors(),
-            pages: extracted_pages,
-        })
+            font_registry.into_descriptors(),
+            extracted_pages,
+        )?)
     }
 
     fn extract_first_page(
@@ -89,29 +92,26 @@ impl ParserBackend for LopdfBackend {
         let first_page_id = find_first_page_id(&document, options.max_page_tree_depth())?;
 
         let mut font_registry = FontRegistry::default();
-        let mut remaining_decoded_budget = options.max_total_decoded_stream_bytes();
+        let decoded_budget = DecodedBudget::new(options.max_total_decoded_stream_bytes());
         let page = extract_page(
             &document,
             1,
             first_page_id,
             &options,
             &control,
-            &mut font_registry,
-            &mut remaining_decoded_budget,
+            FontRegistryAccess::Mutable(&mut font_registry),
+            &decoded_budget,
         )?;
 
-        let source = ExtractionSource {
-            backend: BACKEND_ID,
-            input_sha256: sha256_digest(input_bytes),
-            input_bytes: input_bytes.len(),
-        };
+        let source =
+            ExtractionSource::new(BACKEND_ID, sha256_digest(input_bytes), input_bytes.len());
 
-        Ok(ExtractionDocument {
-            schema_version: SCHEMA_VERSION,
+        Ok(ExtractionDocument::new(
+            SCHEMA_VERSION,
             source,
-            fonts: font_registry.into_descriptors(),
-            pages: vec![page],
-        })
+            font_registry.into_descriptors(),
+            vec![page],
+        )?)
     }
 }
 
@@ -123,7 +123,7 @@ fn extract_pages_serial(
 ) -> Result<(Vec<ExtractionPage>, FontRegistry), ExtractError> {
     let mut extracted_pages = Vec::with_capacity(selected_pages.len());
     let mut font_registry = FontRegistry::default();
-    let mut remaining_decoded_budget = options.max_total_decoded_stream_bytes();
+    let decoded_budget = DecodedBudget::new(options.max_total_decoded_stream_bytes());
     for (page_number, page_id) in selected_pages {
         control.checkpoint(
             ExtractionStage::PageIteration,
@@ -135,8 +135,8 @@ fn extract_pages_serial(
             *page_id,
             options,
             control,
-            &mut font_registry,
-            &mut remaining_decoded_budget,
+            FontRegistryAccess::Mutable(&mut font_registry),
+            &decoded_budget,
         )?);
     }
     Ok((extracted_pages, font_registry))
@@ -150,8 +150,11 @@ fn extract_pages_parallel(
 ) -> Result<(Vec<ExtractionPage>, FontRegistry), ExtractError> {
     use rayon::prelude::*;
 
-    // Deterministic pre-pass: enumerate fonts referenced on each selected page
-    // in page-number order so font IDs are assigned in a stable order.
+    // Deterministic pre-pass: enumerate every font referenced on each selected
+    // page in page-number order so font IDs are assigned stably. After this
+    // pass the registry is complete — parallel workers only *look up* IDs,
+    // never mutate. This is what makes the parallel path actually parallel:
+    // no global mutex is held on the hot path.
     let mut font_registry = FontRegistry::default();
     for (page_number, page_id) in selected_pages {
         control.checkpoint(
@@ -161,94 +164,30 @@ fn extract_pages_parallel(
         emit::prepopulate_font_registry(document, *page_id, &mut font_registry)?;
     }
 
-    let registry_mutex = std::sync::Mutex::new(font_registry);
-    let remaining_budget =
-        std::sync::atomic::AtomicUsize::new(options.max_total_decoded_stream_bytes());
-
-    // par_iter preserves the Vec<(idx, result)> ordering; map then collect
-    // into a pre-allocated Vec<Option<ExtractionPage>> indexed by position.
-    let mut results: Vec<Option<Result<ExtractionPage, ExtractError>>> =
-        (0..selected_pages.len()).map(|_| None).collect();
+    let decoded_budget = DecodedBudget::new(options.max_total_decoded_stream_bytes());
+    let font_registry_ref = &font_registry;
 
     let page_results: Vec<Result<ExtractionPage, ExtractError>> = selected_pages
         .par_iter()
         .map(|(page_number, page_id)| {
-            extract_page_parallel(
+            extract_page(
                 document,
                 *page_number,
                 *page_id,
                 options,
                 control,
-                &registry_mutex,
-                &remaining_budget,
+                FontRegistryAccess::ReadOnly(font_registry_ref),
+                &decoded_budget,
             )
         })
         .collect();
 
-    for (idx, result) in page_results.into_iter().enumerate() {
-        results[idx] = Some(result);
-    }
-
     let mut extracted_pages = Vec::with_capacity(selected_pages.len());
-    for slot in results {
-        extracted_pages.push(slot.ok_or_else(|| ExtractError::InvariantViolation {
-            reason: "parallel extraction produced missing page slot".to_string(),
-        })??);
+    for result in page_results {
+        extracted_pages.push(result?);
     }
-
-    // Extract font registry from the mutex; the registry is fully built by the
-    // pre-pass and may have additional fonts interned during parallel execution.
-    let font_registry =
-        registry_mutex
-            .into_inner()
-            .map_err(|_| ExtractError::InvariantViolation {
-                reason: "font registry mutex was poisoned".to_string(),
-            })?;
 
     Ok((extracted_pages, font_registry))
-}
-
-fn extract_page_parallel(
-    document: &Document,
-    page_number: u32,
-    page_id: ObjectId,
-    options: &ExtractOptions,
-    control: &ExtractionControl,
-    registry_mutex: &std::sync::Mutex<FontRegistry>,
-    remaining_budget: &std::sync::atomic::AtomicUsize,
-) -> Result<ExtractionPage, ExtractError> {
-    // Snapshot the budget once for this page; on content-stream decoding we
-    // will atomically deduct. We take a local copy so the extraction flow
-    // matches the serial code path, then reconcile at the end.
-    let mut local_budget = remaining_budget.load(std::sync::atomic::Ordering::Relaxed);
-
-    // Hold the font registry only during page extraction. This serializes
-    // access to the registry but parallelism is still useful because the
-    // content-stream decoding and op dispatch (the bulk of CPU work) happen
-    // under the lock for that page only.
-    let mut registry_guard =
-        registry_mutex
-            .lock()
-            .map_err(|_| ExtractError::InvariantViolation {
-                reason: "font registry mutex poisoned".to_string(),
-            })?;
-
-    let result = extract_page(
-        document,
-        page_number,
-        page_id,
-        options,
-        control,
-        &mut registry_guard,
-        &mut local_budget,
-    );
-
-    // Reconcile budget: the local_budget was mutated during extraction.
-    // We set the atomic to the min of its current value and local_budget to
-    // preserve the "remaining" invariant across racing threads.
-    remaining_budget.fetch_min(local_budget, std::sync::atomic::Ordering::Relaxed);
-
-    result
 }
 
 fn extract_page(
@@ -257,8 +196,8 @@ fn extract_page(
     page_id: ObjectId,
     options: &ExtractOptions,
     control: &ExtractionControl,
-    font_registry: &mut FontRegistry,
-    remaining_decoded_budget: &mut usize,
+    font_registry: FontRegistryAccess<'_>,
+    decoded_budget: &DecodedBudget,
 ) -> Result<ExtractionPage, ExtractError> {
     let page_number = PageNumber::new(page_number)?;
     control.checkpoint(ExtractionStage::ExtractPageStart, Some(page_number))?;
@@ -282,7 +221,6 @@ fn extract_page(
                 operation_budget: options.max_operations_per_page(),
                 max_elements: options.max_elements_per_page(),
                 stream_byte_limit: options.max_content_stream_bytes(),
-                total_stream_budget: options.max_total_decoded_stream_bytes(),
                 max_form_depth: options.max_form_xobject_depth(),
                 max_form_visits: options.max_form_xobject_visits(),
                 max_content_nesting_depth: options.max_content_nesting_depth(),
@@ -290,7 +228,7 @@ fn extract_page(
             control,
         },
         font_registry,
-        remaining_decoded_budget,
+        decoded_budget,
     )?;
 
     ExtractionPage::new(
